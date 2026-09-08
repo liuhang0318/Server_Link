@@ -70,7 +70,7 @@ test('preload exposes only a validated dropped-File path capability', () => {
   assert.deepEqual(Object.keys(exposedApi).sort(), ['local', 'privateKeys', 'profiles', 'sessions', 'sftp'])
   assert.deepEqual(Object.keys(exposedApi.privateKeys), ['getPathForFile'])
   assert.deepEqual(Object.keys(exposedApi.sftp).sort(), [
-    'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'remove', 'upload', 'uploadFiles'
+    'cancelConnect', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onProgress', 'remove', 'upload', 'uploadFiles'
   ])
   assert.equal(
     exposedApi.privateKeys.getPathForFile({ name: 'id_ed25519', size: 411, localPath: '/Users/test/.ssh/id_ed25519' }),
@@ -91,6 +91,15 @@ test('preload exposes only a validated dropped-File path capability', () => {
   exposedApi.sftp.uploadFiles('connection', '/upload', [{ name: 'real.txt', size: 4, localPath: '/tmp/real.txt' }])
   assert.equal(invocations.at(-1)[0], 'sftp:upload-files')
   assert.equal(invocations.at(-1)[3][0], '/tmp/real.txt')
+  let forwarded
+  let progressListener
+  ipcRenderer.on = (channel, listener) => { assert.equal(channel, 'sftp:progress'); progressListener = listener }
+  ipcRenderer.removeListener = (channel, listener) => { assert.equal(channel, 'sftp:progress'); assert.equal(listener, progressListener) }
+  const unsubscribe = exposedApi.sftp.onProgress(payload => { forwarded = payload })
+  const progress = { transferred: 10 }
+  progressListener({ sender: 'must-not-cross-bridge' }, progress)
+  assert.equal(forwarded, progress)
+  unsubscribe()
 })
 
 test('ssh builder returns fixed executable and separated hardened argv', () => {

@@ -68,6 +68,14 @@ async function confirmNewHost (ownerId, details) {
   return result.response === 0
 }
 
+/** 为本次上传绑定窗口及批次序号，所有上传入口复用同一进度通道。 */
+function uploadProgress (sender, fileIndex = 1, fileCount = 1) {
+  // 只向发起上传的窗口推送元数据，不广播文件路径，也不让已销毁窗口的通知打断传输清理。
+  return progress => {
+    if (!quitPending && !sender.isDestroyed()) sender.send('sftp:progress', { ...progress, fileIndex, fileCount })
+  }
+}
+
 /** Registers the narrow, typed IPC surface available to the sandboxed UI. */
 function registerIpc () {
   ipcMain.handle('local:list', (event, directoryId) => localFiles.list(assertMainFrame(event), directoryId))
@@ -83,10 +91,10 @@ function registerIpc () {
     const results = []
     // 每台服务器独立返回结果；单台或单文件失败不阻断其余已选择的目标。
     for (const target of normalized) {
-      for (const file of paths) {
+      for (const [index, file] of paths.entries()) {
         if (quitPending || event.sender.isDestroyed()) return results
         try {
-          await sftpManager.upload(ownerId, target.connectionId, target.path, file)
+          await sftpManager.upload(ownerId, target.connectionId, target.path, file, uploadProgress(event.sender, index + 1, paths.length))
           results.push({ connectionId: target.connectionId, name: path.basename(file), success: true })
         } catch (error) {
           results.push({ connectionId: target.connectionId, name: path.basename(file), success: false, error: error.message })
@@ -157,6 +165,7 @@ function registerIpc () {
   ipcMain.handle('sftp:list', (event, connectionId, remotePath) => (
     sftpManager.list(assertMainFrame(event), connectionId, remotePath)
   ))
+  ipcMain.handle('sftp:cancel-connect', (event, profileId) => sftpManager.cancelConnect(assertMainFrame(event), profileId))
   ipcMain.handle('sftp:upload-files', async (event, connectionId, remoteDirectory, paths) => {
     const ownerId = assertMainFrame(event)
     sftpManager.assertOwned(ownerId, connectionId)
@@ -166,10 +175,10 @@ function registerIpc () {
     }
     const results = []
     // 单批串行传输，逐项报告成功和失败；关闭窗口后不再启动后续上传。
-    for (const file of paths) {
+    for (const [index, file] of paths.entries()) {
       if (quitPending || event.sender.isDestroyed()) break
       try {
-        const result = await sftpManager.upload(ownerId, connectionId, remoteDirectory, file)
+        const result = await sftpManager.upload(ownerId, connectionId, remoteDirectory, file, uploadProgress(event.sender, index + 1, paths.length))
         results.push({ name: result.name, success: true })
       } catch (error) {
         results.push({ name: path.basename(file), success: false, error: error.message })
@@ -195,7 +204,7 @@ function registerIpc () {
     })
     if (selection.canceled || selection.filePaths.length !== 1) return { canceled: true }
     if (quitPending || sender.isDestroyed()) throw new Error('SFTP connection unavailable')
-    return sftpManager.upload(ownerId, connectionId, remoteDirectory, selection.filePaths[0])
+    return sftpManager.upload(ownerId, connectionId, remoteDirectory, selection.filePaths[0], uploadProgress(sender))
   })
   ipcMain.handle('sftp:download', async (event, connectionId, remotePath) => {
     const ownerId = assertMainFrame(event)

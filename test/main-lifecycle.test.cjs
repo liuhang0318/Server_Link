@@ -29,7 +29,8 @@ async function createMainHarness () {
     quitCalls: 0,
     willQuitEvents: 0,
     sessionStarts: 0,
-    uploads: []
+    uploads: [],
+    progress: []
   }
   let nextWebContentsId = 1
   let resolveSessionCleanup
@@ -47,6 +48,7 @@ async function createMainHarness () {
     getURL () { return rendererUrl }
     isDestroyed () { return this.destroyed }
     setWindowOpenHandler () {}
+    send (channel, payload) { calls.progress.push({ ownerId: this.id, channel, payload }) }
 
     destroy () {
       this.destroyed = true
@@ -106,8 +108,9 @@ async function createMainHarness () {
     closeOwner () {}
     closeAll () {}
     assertOwned () {}
-    async upload (ownerId, connectionId, remotePath, file) {
+    async upload (ownerId, connectionId, remotePath, file, onProgress) {
       calls.uploads.push({ ownerId, connectionId, remotePath, file })
+      onProgress({ connectionId, name: path.basename(file), transferred: 0, total: 10, phase: 'uploading' })
       if (connectionId === 'failure') throw new Error('server unavailable')
       return { name: path.basename(file) }
     }
@@ -290,6 +293,9 @@ test('local upload fans out to selected servers and reports each file independen
   assert.equal(harness.calls.uploads.length, 4)
   assert.equal(harness.calls.uploads[2].ownerId, sender.id)
   assert.equal(harness.calls.uploads[2].remotePath, '/second')
+  assert.ok(harness.calls.progress.every(item => item.ownerId === sender.id && item.channel === 'sftp:progress'))
+  assert.deepEqual(harness.calls.progress.map(item => item.payload.fileIndex), [1, 2, 1, 2])
+  assert.ok(harness.calls.progress.every(item => item.payload.fileCount === 2))
   await assert.rejects(invoke({ sender, senderFrame: {} }, ['one'], targets), /untrusted/u)
   assert.equal(harness.calls.uploads.length, 4)
 })

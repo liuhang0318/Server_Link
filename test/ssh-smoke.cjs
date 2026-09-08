@@ -297,7 +297,11 @@ async function main () {
     // 多块数据覆盖流式背压和非 ASCII 字节完整性，避免只验证一个小数据包。
     const transferBody = 'UPLOAD_DOWNLOAD_OK 中文\n'.repeat(32768)
     await fs.writeFile(uploadSource, transferBody)
-    await sftpManager.upload(2, sftpConnectionId, '/', uploadSource)
+    const uploadProgress = []
+    await sftpManager.upload(2, sftpConnectionId, '/', uploadSource, event => uploadProgress.push(event))
+    assert.equal(uploadProgress.at(-1).phase, 'completed')
+    assert.equal(uploadProgress.at(-1).transferred, Buffer.byteLength(transferBody))
+    assert.equal(uploadProgress.find(event => event.phase === 'finalizing').transferred, Buffer.byteLength(transferBody))
     await sftpManager.download(2, sftpConnectionId, '/upload-source.txt', downloadTarget)
     assert.equal(await fs.readFile(downloadTarget, 'utf8'), transferBody)
     assert.equal(sftpManager.connections.size, 2)

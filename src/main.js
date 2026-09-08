@@ -677,6 +677,7 @@ function createRemotePane (connection) {
   ui.upload.addEventListener('click', () => uploadSftpFile(connection))
   ui.mkdir.addEventListener('click', () => createSftpDirectory(connection))
   ui.close.addEventListener('click', () => closeSftp(connection))
+  ui.retry.addEventListener('click', () => connectSftp(connection.profileId, { activate: false, connection }))
   ui.pathForm.addEventListener('submit', event => {
     event.preventDefault()
     const remotePath = ui.path.value.trim()
@@ -688,7 +689,9 @@ function createRemotePane (connection) {
     else uploadTargets.delete(connection.connectionId)
     syncLocalActions()
   })
-  pane.addEventListener('pointerdown', () => {
+  pane.addEventListener('pointerdown', event => {
+    // 关闭其他文件栏不应先把它激活；否则关闭动作会间接改变当前标签。
+    if (event.target.closest('[data-role="close"]')) return
     state.sftp = connection
     state.activeSessionId = null
     state.sftpActive = true
@@ -706,15 +709,35 @@ function setSftpBusy (busy, message = '', connection = state.sftp) {
   if (!connection) return
   connection.busy = busy
   connection.operation = message
+  if (busy) {
+    connection.transfer = null
+    connection.ui?.transfer.classList.add('hidden')
+  }
   if (connection === state.sftp) state.sftpBusy = busy
   const ui = connection.ui
   if (!ui) return
   ui.pane.setAttribute('aria-busy', String(busy))
   ui.footer.classList.toggle('busy', busy)
   ui.operation.textContent = busy ? message : '拖入文件上传 · 横向滚动查看信息'
-  for (const button of [ui.parent, ui.refresh, ui.mkdir, ui.upload, ui.close]) button.disabled = busy
+  const unavailable = connection.status !== 'ready'
+  for (const button of [ui.parent, ui.refresh, ui.mkdir, ui.upload, ui.pathForm.querySelector('button')]) button.disabled = busy || unavailable
+  ui.close.disabled = busy && !unavailable
   for (const button of ui.list.querySelectorAll('button')) button.disabled = busy
-  ui.path.disabled = busy
+  ui.path.disabled = busy || unavailable
+}
+
+/** 进度事件只更新对应文件栏，绝不重建标签或滚动当前视图。 */
+function handleUploadProgress (progress) {
+  const connection = state.sftpConnections.get(progress?.connectionId)
+  if (!connection?.ui || !connection.busy || !Number.isFinite(progress.total) || !Number.isFinite(progress.transferred)) return
+  connection.transfer = progress
+  const { ui } = connection
+  const percent = progress.phase === 'completed' ? 100 : Math.min(99, Math.floor(progress.transferred * 100 / Math.max(1, progress.total)))
+  const label = progress.phase === 'completed' ? '已完成' : progress.phase === 'failed' ? '上传失败' : progress.phase === 'finalizing' ? '正在确认文件…' : `${percent}%`
+  ui.transfer.classList.remove('hidden')
+  ui.transfer.classList.toggle('failed', progress.phase === 'failed')
+  ui.progress.value = percent
+  ui.transferLabel.textContent = `${progress.fileIndex}/${progress.fileCount} · ${progress.name} · ${label} · ${formatFileSize(progress.transferred)} / ${formatFileSize(progress.total)}${progress.phase === 'uploading' ? ` · ${formatFileSize(progress.bytesPerSecond)}/s` : ''}`
 }
 
 function renderSftpFiles (connection = state.sftp) {
@@ -725,6 +748,17 @@ function renderSftpFiles (connection = state.sftp) {
   ui.path.title = connection.path
   const profile = profileById(connection.profileId)
   ui.target.textContent = profile ? `${profile.username}@${profile.host}` : connection.title
+  const ready = connection.status === 'ready'
+  ui.connectionState.classList.toggle('hidden', ready)
+  ui.connectionState.classList.toggle('connecting', ['queued', 'connecting'].includes(connection.status))
+  ui.connectionState.classList.toggle('failed', connection.status === 'failed')
+  ui.connectionLabel.textContent = connection.status === 'queued' ? '等待连接…' : connection.status === 'connecting' ? '正在连接服务器… 网络异常时自动重试' : connection.error || '连接失败'
+  ui.retry.classList.toggle('hidden', connection.status !== 'failed')
+  ui.pane.querySelector('.sftp-table-wrap').classList.toggle('hidden', !ready)
+  if (!ready) {
+    ui.count.textContent = ''
+    return
+  }
   ui.count.textContent = `${connection.entries.length} 个项目`
   ui.parent.disabled = connection.busy || connection.path === '/'
 
@@ -784,48 +818,81 @@ function renderSftpFiles (connection = state.sftp) {
   if (connection.busy) for (const button of ui.list.querySelectorAll('button')) button.disabled = true
 }
 
-/** 按配置防重入；未加密私钥直接连接，批量任务完成后统一选择文件窗口。 */
-async function connectSftp (profileId, { activate = true, quiet = false } = {}) {
+/** 先按用户选择顺序创建占位文件栏，队列外的服务器也立即可见。 */
+function prepareSftp (profileId) {
+  const existing = [...state.sftpConnections.values()].find(connection => connection.profileId === profileId)
+  if (existing) return existing
+  const profile = profileById(profileId)
+  if (!profile) return null
+  const connection = { profileId, title: `${profile.name} · SFTP`, connectionId: `pending:${profileId}`, status: 'queued', path: '', entries: [], busy: false, operation: '' }
+  state.sftpConnections.set(connection.connectionId, connection)
+  state.filesOpen = true
+  createRemotePane(connection)
+  setSftpBusy(false, '', connection)
+  renderSftpFiles(connection)
+  renderTabs()
+  renderRemoteChoices()
+  return connection
+}
+
+/** 连接完成仅原位替换占位数据；关闭后的晚到结果必须释放，不重新插入窗口。 */
+async function connectSftp (profileId, { activate = true, quiet = false, connection = null } = {}) {
   const profile = profileById(profileId)
   if (!profile || state.sftpConnecting.has(profileId)) return
-  const existing = [...state.sftpConnections.values()].find(connection => connection.profileId === profileId)
-  if (existing) {
-    if (activate) activateSftp(existing.connectionId)
-    return existing.connectionId
-  }
+  connection ??= prepareSftp(profileId)
+  if (!connection || !state.sftpConnections.has(connection.connectionId)) return
+  if (activate) activateSftp(connection.connectionId)
+  if (connection.status === 'ready') return connection.connectionId
 
+  connection.status = 'connecting'
+  connection.error = ''
+  renderSftpFiles(connection)
+  renderTabs()
+  syncWorkspaceState()
   state.sftpConnecting.add(profileId)
   renderProfiles()
   let credential
   try {
     credential = profile.auth === 'password' ? await requestSftpSecret(profile) : { accepted: true, secret: '' }
-    if (!credential.accepted) return
+    if (!credential.accepted) throw new Error('已取消连接')
+    if (!state.sftpConnections.has(connection.connectionId)) return
     if (!quiet) notify(`正在连接 ${profile.name} 的文件服务，临时网络异常将自动重试…`)
     // 私钥是否加密由主进程读取配置文件判定，界面不接触私钥内容。
     let result = await api.sftp.connect(profileId, credential.secret)
     if (result.needsSecret) {
+      if (!state.sftpConnections.has(connection.connectionId)) return
       credential = await requestSftpSecret(profile)
-      if (!credential.accepted) return
+      if (!credential.accepted) throw new Error('已取消连接')
+      if (!state.sftpConnections.has(connection.connectionId)) return
       result = await api.sftp.connect(profileId, credential.secret)
     }
-    const connection = {
-      profileId,
-      title: `${profile.name} · SFTP`,
-      connectionId: result.connectionId,
-      path: result.path,
-      entries: result.entries,
-      busy: false,
-      operation: ''
+    if (!state.sftpConnections.has(connection.connectionId)) {
+      await api.sftp.close(result.connectionId).catch(() => {})
+      return
     }
-    state.sftpConnections.set(result.connectionId, connection)
-    createRemotePane(connection)
+    const previousId = connection.connectionId
+    Object.assign(connection, result, { status: 'ready' })
+    // 保留 Map、DOM 和用户拖动后的标签顺序，不按网络完成顺序重新追加。
+    state.sftpConnections = new Map([...state.sftpConnections].map(([id, item]) => [id === previousId ? result.connectionId : id, item]))
+    tabOrder = tabOrder.map(key => key === `sftp:${previousId}` ? `sftp:${result.connectionId}` : key)
     uploadTargets.add(result.connectionId)
-    if (activate) activateSftp(result.connectionId)
+    setSftpBusy(false, '', connection)
     renderSftpFiles(connection)
+    renderTabs()
+    renderRemoteChoices()
+    syncWorkspaceState()
     if (!quiet) notify('文件服务已连接')
     return result.connectionId
   } catch (error) {
-    notify(`${profile.name}：${errorMessage(error)}`, true)
+    if (state.sftpConnections.has(connection.connectionId)) {
+      connection.status = 'failed'
+      connection.error = errorMessage(error)
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+      renderTabs()
+      syncWorkspaceState()
+      if (!quiet) notify(`${profile.name}：${errorMessage(error)}`, true)
+    }
   } finally {
     if (credential) credential.secret = ''
     state.sftpConnecting.delete(profileId)
@@ -1056,7 +1123,7 @@ function renderRemoteChoices () {
   for (const connection of state.sftpConnections.values()) {
     if (!connection.ui) continue
     connection.ui.selected.checked = uploadTargets.has(connection.connectionId)
-    connection.ui.selected.disabled = localUploading
+    connection.ui.selected.disabled = localUploading || connection.status !== 'ready'
     connection.ui.pane.classList.toggle('active-pane', state.sftp === connection)
   }
   syncLocalActions()
@@ -1080,7 +1147,7 @@ function showServerPicker () {
   document.querySelector('#servers-dialog').showModal()
 }
 
-/** 四路并发连接，单台取消/失败不影响其他目标；结束后统一更新选择和焦点。 */
+/** 先展示全部占位，再四路并发；完成只更新上传目标，不改变当前文件栏和滚动位置。 */
 async function connectSelectedServers (event) {
   event.preventDefault()
   const ids = [...document.querySelectorAll('#server-options input:checked')].map(input => input.value)
@@ -1089,11 +1156,11 @@ async function connectSelectedServers (event) {
   selectingServers = true
   try {
     notify(`正在并发连接 ${ids.length} 台服务器，临时网络异常将自动重试…`)
-    const results = await connectBatch(ids, id => connectSftp(id, { activate: false, quiet: true }))
+    const connections = ids.map(prepareSftp).filter(Boolean)
+    const results = await connectBatch(connections, connection => connectSftp(connection.profileId, { activate: false, quiet: true, connection }))
     const selected = new Set(results.filter(id => id && state.sftpConnections.has(id)))
     uploadTargets.clear()
     for (const id of selected) uploadTargets.add(id)
-    if (selected.size) activateSftp([...selected].at(-1))
     renderRemoteChoices()
     notify(`已选择 ${selected.size} 台上传目标${ids.length > selected.size ? `，${ids.length - selected.size} 台未连接` : ''}`)
   } finally {
@@ -1104,7 +1171,7 @@ async function connectSelectedServers (event) {
 /** 一次上传到勾选的多个目录，主进程逐项返回结果，失败不回滚已成功的文件。 */
 async function uploadLocalSelection (targets = [...state.sftpConnections.values()].filter(item => uploadTargets.has(item.connectionId)), fileIds = [...localSelection]) {
   if (localUploading || !targets.length || !fileIds.length) return
-  if (targets.some(item => item.busy)) return notify('有目标服务器正在操作，请稍后上传', true)
+  if (targets.some(item => item.busy || item.status !== 'ready')) return notify('有目标服务器尚未就绪或正在操作，请稍后上传', true)
   localUploading = true
   syncLocalActions()
   renderRemoteChoices()
@@ -1135,7 +1202,7 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
 }
 
 /** 恢复每个 SFTP 标签自己的目录及传输状态。 */
-function activateSftp (connectionId = state.sftp?.connectionId) {
+function activateSftp (connectionId = state.sftp?.connectionId, { scroll = true } = {}) {
   const connection = state.sftpConnections.get(connectionId)
   if (!connection) return
   state.sftp = connection
@@ -1145,34 +1212,42 @@ function activateSftp (connectionId = state.sftp?.connectionId) {
   renderTabs()
   syncWorkspaceState()
   renderSftpFiles()
-  setSftpBusy(connection.busy, connection.operation, connection)
   renderRemoteChoices()
-  connection.ui.pane.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
+  if (scroll) connection.ui.pane.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
   if (!localDirectory) loadLocalDirectory(null)
 }
 
+/** 关闭非当前栏不改选择；关闭当前栏选相邻栏，保留仍可见栏的位置，不跳到末尾。 */
 async function closeSftp (connection = state.sftp) {
   if (!connection) return
   if (connection.busy) return notify('请等待当前文件操作完成后再关闭')
   const wasActive = state.sftp === connection
+  const columns = document.querySelector('.file-columns')
+  const panes = [...columns.querySelectorAll('.file-pane')]
+  const left = columns.getBoundingClientRect().left
+  const anchor = panes.find(pane => pane !== connection.ui.pane && pane.getBoundingClientRect().right > left)
+  const anchorLeft = anchor?.getBoundingClientRect().left
+  const connections = [...state.sftpConnections.values()]
+  const index = connections.indexOf(connection)
+  const neighbor = connections[index + 1] ?? connections[index - 1]
   state.sftpConnections.delete(connection.connectionId)
   uploadTargets.delete(connection.connectionId)
   connection.ui?.pane.remove()
-  await api.sftp.close(connection.connectionId).catch(() => {})
   if (wasActive) {
-    state.sftp = null
-    const remaining = [...state.sftpConnections.keys()].at(-1)
-    if (remaining) activateSftp(remaining)
-    else openFileWorkspace()
-  } else {
-    renderTabs()
-    renderRemoteChoices()
+    state.sftp = neighbor ?? null
   }
+  renderTabs()
+  renderRemoteChoices()
+  syncWorkspaceState()
+  if (anchor) columns.scrollTo({ left: columns.scrollLeft + anchor.getBoundingClientRect().left - anchorLeft, behavior: 'instant' })
+  // 先更新视图再跨进程关闭，避免等待期间用户切换标签后被旧回调抢走焦点。
+  if (connection.status === 'ready') await api.sftp.close(connection.connectionId).catch(() => {})
+  else await api.sftp.cancelConnect(connection.profileId).catch(() => {})
 }
 
 /** 本地多文件拖放逐项反馈结果；标签切换后仍刷新原来的目标目录。 */
 async function uploadDroppedFiles (connection, files) {
-  if (!connection || connection.busy) return notify('目标服务器正在执行文件操作，请稍后再试')
+  if (!connection || connection.busy || connection.status !== 'ready') return notify('目标服务器尚未就绪或正在执行文件操作，请稍后再试')
   if (!files.length || files.length > 100) return notify('请一次拖入 1～100 个普通文件', true)
   setSftpBusy(true, `正在上传 ${files.length} 个文件…`, connection)
   notify(`开始上传 ${files.length} 个文件 → ${connection.title} ${connection.path}`)
@@ -1197,7 +1272,7 @@ function bindSftpDropTarget (target, getConnection) {
     if (!isFileDrag(event) && !state.draggedRemote && !draggedLocalIds) return
     event.preventDefault()
     const connection = getConnection()
-    const allowed = connection && !connection.busy && (!state.draggedRemote || state.draggedRemote.connection !== connection)
+    const allowed = connection && connection.status === 'ready' && !connection.busy && (!state.draggedRemote || state.draggedRemote.connection !== connection)
     event.dataTransfer.dropEffect = allowed ? 'copy' : 'none'
     target.classList.toggle('drop-target', Boolean(allowed))
   })
@@ -1224,7 +1299,7 @@ function bindSftpDropTarget (target, getConnection) {
 /** 提交前显示具体来源与目标路径，同时提供不依赖拖拽的键盘操作入口。 */
 function openCopyDialog (source, preferredTarget) {
   if (source.connection.busy) return notify('源服务器正在执行文件操作')
-  const destinations = [...state.sftpConnections.values()].filter(item => item !== source.connection && !item.busy)
+  const destinations = [...state.sftpConnections.values()].filter(item => item !== source.connection && item.status === 'ready' && !item.busy)
   if (!destinations.length) return notify('请先打开另一台服务器的 SFTP 标签，并等待它完成当前操作', true)
   const select = document.querySelector('#copy-target')
   select.replaceChildren(...destinations.map(connection => {
@@ -1309,7 +1384,7 @@ function renderTabs () {
     tab.dataset.tabKey = `sftp:${connection.connectionId}`
     const label = document.createElement('span')
     label.className = 'tab-label'
-    label.textContent = connection.title
+    label.textContent = `${connection.title}${connection.status === 'ready' ? '' : connection.status === 'failed' ? ' · 失败' : ' · 连接中'}`
     tab.replaceChildren(label)
     tab.setAttribute('role', 'tab')
     const active = state.sftpActive && state.sftp === connection
@@ -1317,7 +1392,7 @@ function renderTabs () {
     tab.classList.toggle('active', active)
     bindSftpDropTarget(tab, () => connection)
     const dot = document.createElement('span')
-    dot.className = 'tab-dot running'
+    dot.className = `tab-dot ${connection.status === 'ready' ? 'running' : connection.status === 'failed' ? 'exited' : 'connecting'}`
     tab.prepend(dot)
     elements.tabs.append(tab)
   }
@@ -1421,7 +1496,7 @@ function syncWorkspaceState () {
   elements.reconnect.classList.toggle('hidden', !session)
 
   if (state.sftpActive && state.sftp) {
-    elements.sessionStatus.textContent = 'SFTP 已连接'
+    elements.sessionStatus.textContent = state.sftp.status === 'ready' ? 'SFTP 已连接' : state.sftp.status === 'failed' ? 'SFTP 连接失败' : 'SFTP 连接中'
     elements.sessionStatus.className = 'status-pill running'
     return
   }
@@ -1700,6 +1775,7 @@ elements.secretDialog.addEventListener('cancel', event => {
   finishSftpSecret(false)
 })
 api.sessions.onEvent(handleSessionEvent)
+api.sftp.onProgress(handleUploadProgress)
 
 try {
   state.profiles = await api.profiles.list()

@@ -238,7 +238,19 @@ fieldset { margin: 0; padding: 0; border: 0; }
 #sidebar-toggle { flex-shrink: 0; font-size: 16px; }
 .file-workspace-tools { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .file-workspace-tools > div { display: flex; gap: 6px; flex-shrink: 0; }
-.file-columns { display: flex; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth; }
+.file-columns { display: flex; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth; overflow-anchor: none; }
+.sftp-connection-state { margin: 12px; padding: 24px 18px; border: 1px solid var(--border); border-radius: 12px; color: var(--accent); display: flex; flex-direction: column; gap: 16px; }
+.sftp-connection-state.connecting::before, .tab-dot.connecting { animation: pulse 1.3s ease-in-out infinite; background: var(--accent); }
+.sftp-connection-state.connecting::before { content: ''; width: 24px; height: 3px; border-radius: 3px; }
+.sftp-connection-state.failed { color: #e995a3; }
+.sftp-transfer { padding: 12px; border-top: 1px solid var(--border); }
+.transfer-label { color: var(--accent); font-size: 11px; overflow-wrap: anywhere; margin-bottom: 8px; }
+.sftp-transfer progress { display: block; width: 100%; height: 6px; accent-color: var(--accent); }
+.sftp-transfer progress::-webkit-progress-bar { background: #ffffff12; border-radius: 4px; }
+.sftp-transfer progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; transition: width .12s linear; }
+.sftp-transfer.failed .transfer-label { color: #e995a3; }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .tab-dot.connecting, .sftp-connection-state.connecting::before { animation: none; } .sftp-transfer progress::-webkit-progress-value { transition: none; } }
 .file-columns .file-pane { position: relative; flex: 0 0 auto; width: 560px; border-right: 1px solid var(--border); padding-right: 5px; }
 .file-columns .add-server-pane { width: 350px; }
 .file-pane.active-pane > .sftp-heading { background: #203129; }

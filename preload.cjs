@@ -96,6 +96,14 @@ const api = Object.freeze({
     }
   }),
   sftp: Object.freeze({
+    /** 仅暴露本窗口上传进度数据，隔离 Electron 事件对象并允许移除监听。 */
+    onProgress: listener => {
+      if (typeof listener !== 'function') throw new TypeError('listener must be a function')
+      const wrapped = (_event, payload) => listener(payload)
+      ipcRenderer.on('sftp:progress', wrapped)
+      return () => ipcRenderer.removeListener('sftp:progress', wrapped)
+    },
+    cancelConnect: profileId => ipcRenderer.invoke('sftp:cancel-connect', requireString(profileId, 'profileId')),
     /** 只从真实拖入的 File 解析路径，不向渲染层提供任意本地路径上传接口。 */
     uploadFiles: (connectionId, remoteDirectory, files) => {
       if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new TypeError('请一次拖入 1～100 个文件')

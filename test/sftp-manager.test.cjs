@@ -128,7 +128,51 @@ test('failed upload removes only its temporary remote file and never publishes i
   }
   const manager = new SftpManager({ knownHostsPath: '/tmp/serverlink-unused-hosts', confirmHost: async () => false })
   manager.connections.set(connectionId, { ownerId: 7, sftp })
-  await assert.rejects(manager.upload(7, connectionId, '/target', localPath), /transfer failed/u)
+  const progress = []
+  await assert.rejects(manager.upload(7, connectionId, '/target', localPath, event => progress.push(event)), /transfer failed/u)
+  assert.equal(progress.at(-1).phase, 'failed')
+  assert.equal(progress.some(event => event.phase === 'completed'), false)
   assert.match(temporaryPath, /^\/target\/\.serverlink-[0-9a-f-]+\.part$/u)
   assert.equal(deletedPath, temporaryPath)
+})
+
+test('upload progress counts acknowledged bytes and completes only after publish, including empty files', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'serverlink-progress-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  for (const size of [512 * 1024, 0]) {
+    const source = path.join(directory, 'fixture.bin')
+    await fs.writeFile(source, Buffer.alloc(size))
+    const events = []
+    let published = false
+    const sftp = {
+      lstat: (_path, callback) => callback(Object.assign(new Error('missing'), { code: 2 })),
+      createWriteStream: () => {
+        const stream = new Writable({
+          write: (chunk, _encoding, callback) => {
+            setTimeout(() => { stream.bytesWritten += chunk.length; callback() }, 40)
+          }
+        })
+        stream.bytesWritten = 0
+        process.nextTick(() => stream.emit('open'))
+        return stream
+      },
+      rename: (_from, _to, callback) => {
+        assert.equal(events.some(event => event.phase === 'completed'), false)
+        published = true
+        callback()
+      }
+    }
+    const manager = new SftpManager({ knownHostsPath: '/tmp/unused-progress-hosts', confirmHost: async () => false })
+    manager.connections.set(connectionId, { ownerId: 7, sftp })
+    await manager.upload(7, connectionId, '/', source, event => {
+      if (event.phase === 'completed') assert.equal(published, true)
+      events.push(event)
+    })
+    assert.equal(events[0].transferred, 0)
+    assert.equal(events.at(-1).phase, 'completed')
+    assert.equal(events.at(-1).transferred, size)
+    assert.ok(events.every(event => event.connectionId === connectionId && event.total === size && !JSON.stringify(event).includes(directory)))
+    if (size) assert.ok(events.some(event => event.transferred > 0 && event.transferred < size))
+    for (let i = 1; i < events.length; i++) assert.ok(events[i].transferred >= events[i - 1].transferred)
+  }
 })

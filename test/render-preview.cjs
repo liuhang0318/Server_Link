@@ -8,10 +8,19 @@ const dist = path.resolve(__dirname, '..', 'dist')
 const bridge = `
 (() => {
   let listener;
+  let progressListener;
   let sessionCount = 0;
   const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
   const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
   const folders = [];
+  // 静态假进度仅用于 UI 检查，不读取本机文件或访问服务器。
+  async function mockUpload(connectionId, name, fileIndex = 1, fileCount = 1) {
+    for (let step = 0; step <= 20; step++) {
+      progressListener({ connectionId, transferId: name, name, fileIndex, fileCount, total: 10485760, transferred: step * 524288, bytesPerSecond: 524288, phase: step === 20 ? 'completed' : 'uploading' });
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return { name, success: true };
+  }
   window.serverLink = {
     local: {
       list: async id => ({ id: id || 'local-home', path: id === 'local-folder' ? '/Users/demo/Documents' : '/Users/demo', parentId: id === 'local-folder' ? 'local-home' : null, entries: [
@@ -19,7 +28,11 @@ const bridge = `
         { id: 'local-file-1', name: 'server-config.json', type: 'file', size: 2048, modifiedAt: '2026-09-08T02:00:00.000Z' },
         { id: 'local-file-2', name: 'release.tar.gz', type: 'file', size: 4280044, modifiedAt: '2026-09-08T02:00:00.000Z' }
       ] }),
-      upload: async (ids, targets) => targets.flatMap(target => ids.map(id => ({ connectionId: target.connectionId, name: id === 'local-file-1' ? 'server-config.json' : 'release.tar.gz', success: true })))
+      upload: async (ids, targets) => {
+        const results = [];
+        for (const target of targets) for (const [index, id] of ids.entries()) results.push({ connectionId: target.connectionId, ...await mockUpload(target.connectionId, id, index + 1, ids.length) });
+        return results;
+      }
     },
     profiles: {
       list: async () => profiles,
@@ -47,10 +60,11 @@ const bridge = `
       close: async sessionId => listener({ type: 'exit', sessionId, exitCode: 0 })
     },
     sftp: {
+      onProgress: callback => { progressListener = callback; },
+      cancelConnect: async () => {},
       // 仅模拟加密密钥的提示分支，不读取路径，不校验或保存输入，也不发出网络请求。
       connect: async (profileId, secret) => {
-        if (profileId !== 'render-fixture' && !secret) return { needsSecret: true };
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, profileId === 'render-fixture' ? 1500 : 10000));
         return {
         connectionId: 'preview-sftp-' + profileId,
         path: '/var/www',
@@ -65,8 +79,12 @@ const bridge = `
         if (remotePath === '/missing') throw new Error('目录不存在，请检查路径');
         return { path: remotePath, entries: folders };
       },
-      upload: async () => ({ canceled: false }),
-      uploadFiles: async (_id, _path, files) => files.map(file => ({ name: file.name, success: true })),
+      upload: async id => mockUpload(id, 'preview-upload.tar.gz'),
+      uploadFiles: async (id, _path, files) => {
+        const results = [];
+        for (const [index, file] of files.entries()) results.push(await mockUpload(id, file.name, index + 1, files.length));
+        return results;
+      },
       copyBetween: async (_sourceId, sourcePath, _destinationId, _directory) => {
         folders.push({ name: sourcePath.split('/').pop(), type: 'file', size: 1280440, modifiedAt: '2026-09-08T02:31:00.000Z' });
         return true;
