@@ -9,8 +9,8 @@ const bridge = `
 (() => {
   let listener;
   let sessionCount = 0;
-  const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'password', privateKeyPath: null };
-  const profiles = [profile, { ...profile, id: 'preview-staging', name: 'mamo线上1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: 'mamo线上3', host: 'backup.example.com' }];
+  const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
+  const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
   const folders = [];
   window.serverLink = {
     local: {
@@ -47,7 +47,11 @@ const bridge = `
       close: async sessionId => listener({ type: 'exit', sessionId, exitCode: 0 })
     },
     sftp: {
-      connect: async profileId => ({
+      // 仅模拟加密密钥的提示分支，不读取路径，不校验或保存输入，也不发出网络请求。
+      connect: async (profileId, secret) => {
+        if (profileId !== 'render-fixture' && !secret) return { needsSecret: true };
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return {
         connectionId: 'preview-sftp-' + profileId,
         path: '/var/www',
         entries: [
@@ -55,7 +59,8 @@ const bridge = `
           { name: 'serverlink.tar.gz', type: 'file', size: 1280440, modifiedAt: '2026-09-08T02:30:00.000Z' },
           { name: 'current', type: 'symlink', size: 18, modifiedAt: '2026-09-08T02:31:00.000Z' }
         ]
-      }),
+        };
+      },
       list: async (_connectionId, remotePath) => {
         if (remotePath === '/missing') throw new Error('目录不存在，请检查路径');
         return { path: remotePath, entries: folders };

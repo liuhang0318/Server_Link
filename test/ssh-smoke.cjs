@@ -287,7 +287,11 @@ async function main () {
       return result.connectionId
     }
 
-    const sftpConnectionId = await connectSftp('password')
+    // 两台真实本机服务并发握手，覆盖多连接下认证和归属隔离。
+    const [sftpConnectionId, destinationId] = await Promise.all([
+      connectSftp('password'),
+      connectSftp('password', secondServer.address().port)
+    ])
     const uploadSource = path.join(directory, 'upload-source.txt')
     const downloadTarget = path.join(directory, 'download-target.txt')
     // 多块数据覆盖流式背压和非 ASCII 字节完整性，避免只验证一个小数据包。
@@ -296,7 +300,6 @@ async function main () {
     await sftpManager.upload(2, sftpConnectionId, '/', uploadSource)
     await sftpManager.download(2, sftpConnectionId, '/upload-source.txt', downloadTarget)
     assert.equal(await fs.readFile(downloadTarget, 'utf8'), transferBody)
-    const destinationId = await connectSftp('password', secondServer.address().port)
     assert.equal(sftpManager.connections.size, 2)
     await sftpManager.copyBetween(2, sftpConnectionId, '/upload-source.txt', destinationId, '/')
     assert.equal(await fs.readFile(path.join(secondRoot, 'upload-source.txt'), 'utf8'), transferBody)

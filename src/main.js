@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import './style.css'
 import { moveTab } from './tab-order.mjs'
 import { groupProfiles } from './profile-groups.mjs'
+import { connectBatch } from './connection-batch.mjs'
 
 const api = window.serverLink
 document.querySelector('#app-version').textContent = `SSH & SFTP · v${version}`
@@ -56,7 +57,7 @@ const state = {
   filesOpen: false,
   sftpBusy: false,
   secretResolve: null,
-  sftpConnecting: false,
+  sftpConnecting: new Set(),
   draggedRemote: null,
   copySource: null,
   connectingProfiles: new Set()
@@ -206,7 +207,7 @@ function renderProfiles () {
       const sshButton = actions.querySelector('.connect-button')
       sshButton.disabled = state.connectingProfiles.has(profile.id)
       if (sshButton.disabled) sshButton.textContent = '连接中…'
-      actions.querySelector('.sftp').disabled = state.sftpConnecting
+      actions.querySelector('.sftp').disabled = state.sftpConnecting.has(profile.id)
       item.append(avatar, details, actions)
       parent.append(item)
     }
@@ -221,7 +222,7 @@ function highlightProfile () {
   for (const group of elements.profileList.querySelectorAll('.profile-group')) group.classList.toggle('has-active', Boolean(group.querySelector('.profile-item.selected')))
 }
 
-/** 一组只启动一次批次；复用已打开的终端，逐台启动避免界面反复抢焦点。 */
+/** 一组只启动一次批次；并发启动并复用已有终端，全部启动后只切换一次焦点。 */
 async function connectProfileGroup (group) {
   if (connectingGroups.has(group.key)) return
   connectingGroups.add(group.key)
@@ -232,16 +233,18 @@ async function connectProfileGroup (group) {
   let failed = 0
   let lastId = null
   try {
-    for (const profile of group.profiles) {
+    const ids = await connectBatch(group.profiles, async profile => {
       const existing = [...state.sessions.values()].find(item => item.profileId === profile.id && item.status === 'running')
       if (existing || state.connectingProfiles.has(profile.id)) {
         skipped++
-        lastId = existing?.id ?? lastId
-        continue
+        return existing?.id
       }
       const id = await connectProfile(profile.id, { activate: false, quiet: true })
-      if (id) { opened++; lastId = id } else failed++
-    }
+      if (id) opened++
+      else failed++
+      return id
+    })
+    lastId = ids.filter(Boolean).at(-1)
     if (lastId) activateSession(lastId)
     notify(`${group.name}：已打开 ${opened} 个终端，复用 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`, failed > 0)
   } finally {
@@ -512,7 +515,7 @@ function createTerminalSession (sessionId, profile) {
 
 /** 进度来自本机 SSH 诊断；PTY 出现提示时显示交互区，确保口令/指纹确认不被遮挡。 */
 function syncTerminalPresentation (session) {
-  const labels = { connecting: '正在连接服务器…', verifying: '正在验证服务器身份…', authenticating: '正在验证登录身份…', connected: '连接成功', failed: '连接失败，请查看日志或重新连接' }
+  const labels = { connecting: '正在连接服务器…', retrying: `网络暂时异常，准备第 ${session.retryAttempt || 1}/2 次重试…`, verifying: '正在验证服务器身份…', authenticating: '正在验证登录身份…', connected: '连接成功', failed: '连接失败，请查看日志或重新连接' }
   session.progressLabel.textContent = session.status === 'exited' ? '连接已结束，请查看日志' : labels[session.phase]
   session.progressRail.classList.toggle('failed', session.phase === 'failed' || session.status === 'exited')
   session.card.classList.toggle('hidden', session.connected)
@@ -562,20 +565,25 @@ async function connectProfile (profileId, { activate = true, quiet = false } = {
   }
 }
 
-// Collect credentials only for the pending connection and clear the field as
-// soon as the modal resolves; no secret is added to profile or SFTP state.
-function requestSftpSecret (profile) {
-  if (profile.auth === 'agent') return Promise.resolve({ accepted: true, secret: '' })
-  if (state.secretResolve) return Promise.resolve({ accepted: false, secret: '' })
+let secretQueue = Promise.resolve()
 
+/** 并发连接仅把必须的凭据对话框排队，避免互相覆盖或把其他主机的口令串用。 */
+function requestSftpSecret (profile) {
+  const result = secretQueue.then(() => showSftpSecret(profile))
+  secretQueue = result.then(() => {}, () => {})
+  return result
+}
+
+/** 仅在密码登录或主进程明确检测到加密私钥时收集凭据，关闭即清空输入框。 */
+function showSftpSecret (profile) {
   elements.secretForm.reset()
   const usesPassword = profile.auth === 'password'
   elements.secretTitle.textContent = `连接 ${profile.name}`
-  elements.secretLabel.textContent = usesPassword ? '登录密码' : '私钥口令（没有可留空）'
+  elements.secretLabel.textContent = usesPassword ? '登录密码' : '加密私钥口令'
   elements.secretNote.textContent = usesPassword
     ? '密码只用于本次 SFTP 连接，不会保存。'
-    : '口令只用于本次解密私钥，不会保存。未加密私钥可直接连接。'
-  elements.secretInput.required = usesPassword
+    : '该私钥已加密，需要口令解锁。口令只用于本次连接，不会保存。'
+  elements.secretInput.required = true
   elements.secretDialog.showModal()
   elements.secretInput.focus()
   return new Promise(resolve => { state.secretResolve = resolve })
@@ -776,24 +784,30 @@ function renderSftpFiles (connection = state.sftp) {
   if (connection.busy) for (const button of ui.list.querySelectorAll('button')) button.disabled = true
 }
 
-/** 串行建立文件连接，防止连续点击产生未展示的后台会话。 */
-async function connectSftp (profileId) {
+/** 按配置防重入；未加密私钥直接连接，批量任务完成后统一选择文件窗口。 */
+async function connectSftp (profileId, { activate = true, quiet = false } = {}) {
   const profile = profileById(profileId)
-  if (!profile || state.sftpConnecting) return
+  if (!profile || state.sftpConnecting.has(profileId)) return
   const existing = [...state.sftpConnections.values()].find(connection => connection.profileId === profileId)
   if (existing) {
-    activateSftp(existing.connectionId)
-    return
+    if (activate) activateSftp(existing.connectionId)
+    return existing.connectionId
   }
 
-  state.sftpConnecting = true
+  state.sftpConnecting.add(profileId)
   renderProfiles()
   let credential
   try {
-    credential = await requestSftpSecret(profile)
+    credential = profile.auth === 'password' ? await requestSftpSecret(profile) : { accepted: true, secret: '' }
     if (!credential.accepted) return
-    notify(`正在连接 ${profile.name} 的文件服务…`)
-    const result = await api.sftp.connect(profileId, credential.secret)
+    if (!quiet) notify(`正在连接 ${profile.name} 的文件服务，临时网络异常将自动重试…`)
+    // 私钥是否加密由主进程读取配置文件判定，界面不接触私钥内容。
+    let result = await api.sftp.connect(profileId, credential.secret)
+    if (result.needsSecret) {
+      credential = await requestSftpSecret(profile)
+      if (!credential.accepted) return
+      result = await api.sftp.connect(profileId, credential.secret)
+    }
     const connection = {
       profileId,
       title: `${profile.name} · SFTP`,
@@ -806,14 +820,15 @@ async function connectSftp (profileId) {
     state.sftpConnections.set(result.connectionId, connection)
     createRemotePane(connection)
     uploadTargets.add(result.connectionId)
-    activateSftp(result.connectionId)
-    renderSftpFiles()
-    notify('文件服务已连接')
+    if (activate) activateSftp(result.connectionId)
+    renderSftpFiles(connection)
+    if (!quiet) notify('文件服务已连接')
+    return result.connectionId
   } catch (error) {
-    notify(errorMessage(error), true)
+    notify(`${profile.name}：${errorMessage(error)}`, true)
   } finally {
     if (credential) credential.secret = ''
-    state.sftpConnecting = false
+    state.sftpConnecting.delete(profileId)
     renderProfiles()
   }
 }
@@ -1048,7 +1063,7 @@ function renderRemoteChoices () {
 }
 
 function showServerPicker () {
-  if (state.sftpConnecting || selectingServers || localUploading) return notify('正在连接或传输，请稍候')
+  if (state.sftpConnecting.size || selectingServers || localUploading) return notify('正在连接或传输，请稍候')
   const list = document.querySelector('#server-options')
   list.replaceChildren()
   for (const profile of state.profiles) {
@@ -1065,22 +1080,20 @@ function showServerPicker () {
   document.querySelector('#servers-dialog').showModal()
 }
 
-/** 多台依次验证凭据；取消单台或认证失败继续处理其他选择，不保存任何密码。 */
+/** 四路并发连接，单台取消/失败不影响其他目标；结束后统一更新选择和焦点。 */
 async function connectSelectedServers (event) {
   event.preventDefault()
   const ids = [...document.querySelectorAll('#server-options input:checked')].map(input => input.value)
   if (!ids.length || ids.length > 20) return notify('请选择 1～20 台服务器', true)
   document.querySelector('#servers-dialog').close()
   selectingServers = true
-  const selected = new Set()
   try {
-    for (const id of ids) {
-      await connectSftp(id)
-      const connection = [...state.sftpConnections.values()].find(item => item.profileId === id)
-      if (connection) selected.add(connection.connectionId)
-    }
+    notify(`正在并发连接 ${ids.length} 台服务器，临时网络异常将自动重试…`)
+    const results = await connectBatch(ids, id => connectSftp(id, { activate: false, quiet: true }))
+    const selected = new Set(results.filter(id => id && state.sftpConnections.has(id)))
     uploadTargets.clear()
     for (const id of selected) uploadTargets.add(id)
+    if (selected.size) activateSftp([...selected].at(-1))
     renderRemoteChoices()
     notify(`已选择 ${selected.size} 台上传目标${ids.length > selected.size ? `，${ids.length - selected.size} 台未连接` : ''}`)
   } finally {
@@ -1442,8 +1455,9 @@ function handleSessionEvent (payload) {
     // 终端输出不改变标签状态，避免高频输出重建标签、打断点击及排序。
     return
   } else if (payload.type === 'progress') {
-    if (!['connecting', 'verifying', 'authenticating', 'connected', 'failed'].includes(payload.phase)) return
+    if (!['connecting', 'retrying', 'verifying', 'authenticating', 'connected', 'failed'].includes(payload.phase)) return
     session.phase = payload.phase
+    session.retryAttempt = payload.attempt
     session.logs = typeof payload.logs === 'string' ? payload.logs.slice(-16000) : ''
     if (payload.phase === 'connected') session.connected = true
     syncTerminalPresentation(session)
