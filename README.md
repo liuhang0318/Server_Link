@@ -1,2 +1,74 @@
-# Server_Link
-类似于xshell的mac客户端软件
+# ServerLink
+
+ServerLink 是一个安全优先的 macOS SSH / SFTP 客户端。SSH 终端使用系统 `/usr/bin/ssh`，SFTP 使用 MIT 许可的 `@electerm/ssh2`，Electron 负责本地界面、PTY 和受限文件操作桥接。
+
+## 当前能力
+
+- 保存、编辑和删除 SSH 连接配置；不保存密码或私钥内容。
+- 新建连接支持批量添加：公共用户名（默认 root）、端口和私钥只填一次，每行输入 IP/域名或「名称,地址」，一次最多 100 台。所有行校验通过后一次保存，错误标明行号；批次内重复地址会被拒绝。
+- 使用当前 macOS SSH Agent、指定一个绝对私钥路径，或由系统 SSH 在终端中交互询问密码。私钥路径支持手动输入，也支持把单个私钥文件拖入表单。
+- 多会话标签页、终端自适应、重连与关闭。
+- SSH/SFTP 标签可左右拖动混合排序，拖动至边缘自动滚动，Escape 可取消排序；连接及选中状态不受影响。
+- 左侧自动按命名前缀分组（例如 mamo线上1 / mamo线上3 → mamo线上，测试-api / 测试-web → 测试），点击组名展开。仅有一台的组直接显示，搜索时自动展开匹配分组。
+- 首次连接由系统 OpenSSH 在终端中询问主机指纹；主机记录写入应用自己的 `known_hosts`。
+- 图形化 SFTP：浏览目录、返回上级、刷新、上传、下载、新建文件夹，以及确认后删除文件或空文件夹。
+- 多台服务器可同时打开独立 SFTP 标签，各自保留当前目录与操作状态。
+- 本地文件可拖到文件面板或目标 SFTP 标签上传，一批最多 100 个普通文件。远程文件可拖到另一台 SFTP 标签，或点击“复制到…”选择目标，确认路径后复制；客户端流式转发，无需服务器间配置 SSH 互信。目录请先压缩后传输，同名文件不覆盖。
+- 支持服务器搜索（⌘K）、添加连接（⌘N）、远程路径直接跳转，以及非阻塞操作提示。
+- macOS 隐藏标题栏中的品牌区、顶部空白区和标签栏空白区均可拖动窗口，所有按钮和输入区保持可交互。
+
+## 安全边界
+
+- 渲染进程启用 `sandbox` 与 `contextIsolation`，关闭 Node 集成、弹窗、导航、权限请求和 DevTools。
+- preload 只暴露配置 CRUD、SSH 会话控制和固定的 SFTP 操作，不暴露通用 IPC、文件系统或命令执行能力。
+- 私钥拖放只通过 `webUtils.getPathForFile` 解析用户真实拖入的单个 `File`；渲染层拿不到 `fs`、文件内容、目录枚举或任意路径查询能力。解析出的绝对路径仍由主进程再次校验。
+- SSH 固定执行 `/usr/bin/ssh`，使用 argv 数组且不经过 shell。主机、端口、用户和路径均在主进程重新校验。
+- 忽略用户与系统 SSH 配置（`-F none`），禁用代理命令、跳板、端口转发、本地命令和 Agent 转发。
+- 密码和私钥口令只作为临时终端按键，经固定的 `sessions:write` IPC 写入系统 SSH 所在 PTY；它们不会保存、记录，也不会进入 argv 或环境变量。Agent/私钥模式关闭密码与键盘交互认证，避免意外降级。
+- SFTP 密码或私钥口令只在连接弹窗中临时收集。私钥内容仅由主进程读取；上传源路径来自 macOS 文件对话框或预加载层解析的真实拖放 File，下载目标路径由 macOS 保存对话框选择。
+- SFTP 与 SSH 共用应用专属 `known_hosts`。首次出现的新指纹必须确认，已经保存的主机指纹发生变化或被吊销时会直接拒绝连接。
+- 远程路径必须是绝对 POSIX 路径；删除操作还会由主进程弹出确认，目录仅允许在为空时删除。
+- 配置目录权限为 `0700`，配置与 `known_hosts` 文件为 `0600`；配置更新通过临时文件、`fsync` 和原子重命名完成。
+- CSP 禁止外部资源与网络连接；允许 xterm 动态生成字符宽度、光标和 ANSI 颜色所需的样式表与样式属性，脚本仍不允许内联。OSC 52 剪贴板写入被丢弃，终端不注册链接打开器。
+
+这仍是本地优先的 MVP，不包含端口转发、云同步、密码库、跳板机和自动更新。公开分发前仍需 Developer ID、Hardened Runtime 与 Apple 公证。
+
+## 本地运行
+
+要求 macOS、Node.js 22+。克隆项目并安装锁定版本依赖：
+
+```sh
+git clone git@github.com:liuhang0318/Server_Link.git
+cd Server_Link
+npm ci
+npm run build
+npm start
+```
+
+自动测试与本机 SSH/SFTP 回环测试：
+
+```sh
+npm test
+node test/ssh-smoke.cjs
+```
+
+回环测试仅使用临时密钥和 `127.0.0.1`，不会连接实际服务器。项目可独立构建，无需 Electerm 父项目。开源参考和许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## macOS 客户端打包
+
+在 Apple Silicon Mac 上生成 `.app` 和安装用 DMG：
+
+```sh
+npm ci
+npm run package:mac
+```
+
+产物写入 `release/`。打包使用系统 `hdiutil` 生成 DMG，不需要额外下载 DMG helper；同时会关闭 Electron 的 Run-as-Node、`NODE_OPTIONS` 和调试参数入口，强制从带完整性校验的 ASAR 加载应用代码，并移除客户端不使用的摄像头、麦克风、蓝牙和任意网络权限声明。由于界面从应用内的 `file://` 资源加载，保留 Electron 对该协议的资源读取能力，CSP 与导航拦截仍禁止外部内容。当前配置生成的是 ad-hoc 签名本机测试版；从网络分发时，macOS Gatekeeper 会提示开发者身份未验证。公开发行前必须改用 Developer ID Application 证书，启用 Hardened Runtime，并完成 Apple 公证与 stapling。
+
+## 数据位置
+
+发布包关闭 Electron Cookie 加密入口，避免访问“ServerLink Safe Storage”钥匙串。应用不使用 Cookie 保存凭据，SSH/SFTP 协议加密不受影响；以后如引入网页登录，应重新评估此配置。
+
+打包成功且签名、DMG 校验通过后，自动删除 `release/` 和 `release/obsolete/` 中版本较旧的 `ServerLink-*-arm64.dmg` 及其 `.sha256` 文件；保留当前版本、较新版本及其他文件。旧包直接删除，不移入废纸篓。
+
+应用通过 Electron 的 `userData` 目录保存 `secure-data/profiles.json` 和 `secure-data/known_hosts`。删除配置不会中断已经启动的 SSH 进程；关闭窗口或退出应用会清理其拥有的 SSH 和 SFTP 会话。

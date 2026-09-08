@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+    <title>ServerLink</title>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">SL</div>
+          <div>
+            <strong>ServerLink</strong>
+            <span id="app-version">Secure SSH workspace</span>
+          </div>
+        </div>
+        <label class="profile-search"><span aria-hidden="true">⌕</span><input id="profile-search" type="search" placeholder="搜索服务器" aria-label="搜索服务器"><kbd>⌘ K</kbd></label>
+        <div class="sidebar-heading">
+          <span>服务器 <span id="profile-count">0</span></span>
+          <button id="add-profile" class="icon-button" type="button" aria-label="新增服务器">＋</button>
+        </div>
+        <div id="profile-list" class="profile-list" aria-live="polite"></div>
+        <div class="security-note">
+          <span class="security-dot"></span>
+          本地工作空间 <span class="local-note">凭据不保存</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div id="session-tabs" class="session-tabs" role="tablist"></div>
+          <div class="session-actions">
+            <span id="session-status" class="status-pill">未连接</span>
+            <button id="reconnect-session" class="ghost-button" type="button" disabled>重新连接</button>
+            <button id="close-session" class="ghost-button danger" type="button" disabled>关闭</button>
+          </div>
+        </header>
+
+        <section id="empty-state" class="empty-state">
+          <div class="empty-glyph" aria-hidden="true">›_</div>
+          <span class="eyebrow">YOUR SERVERS. YOUR WORKSPACE.</span>
+          <h1>从这里，连接你的世界</h1>
+          <p>终端与文件，尽在一个工作空间。<br>选择左侧服务器，或添加你的第一个连接。</p>
+          <button id="empty-add-profile" class="primary-button" type="button">＋ 添加服务器</button>
+          <div class="welcome-features"><span>›_ SSH 终端</span><span>↗ SFTP 文件</span><span>⌘ K 快速查找</span></div>
+        </section>
+        <section id="terminal-stack" class="terminal-stack" aria-label="SSH 终端"></section>
+        <section id="sftp-panel" class="sftp-panel hidden" aria-label="SFTP 文件管理器">
+          <div class="sftp-heading"><div><p class="eyebrow">REMOTE FILES</p><h2>文件管理</h2></div><span id="sftp-target" class="sftp-meta"></span></div>
+          <div class="sftp-toolbar">
+            <button id="sftp-parent" class="ghost-button" type="button">← 上一级</button>
+            <button id="sftp-refresh" class="ghost-button" type="button">刷新</button>
+            <form id="sftp-path-form" class="path-form"><input id="sftp-path" class="sftp-path" value="/" aria-label="远程目录路径" spellcheck="false" autocomplete="off"><button class="text-button" type="submit" title="前往目录">前往</button></form>
+            <button id="sftp-mkdir" class="ghost-button" type="button">新建文件夹</button>
+            <button id="sftp-upload" class="primary-button" type="button">上传文件</button>
+          </div>
+          <div class="sftp-table-wrap">
+            <table class="sftp-table">
+              <thead>
+                <tr><th>名称</th><th>大小</th><th>修改时间</th><th><span class="visually-hidden">操作</span></th></tr>
+              </thead>
+              <tbody id="sftp-file-list"></tbody>
+            </table>
+            <div id="sftp-message" class="sftp-message" aria-live="polite">正在连接…</div>
+          </div>
+          <footer class="sftp-footer"><span id="sftp-count">0 个项目</span><span id="sftp-operation" role="status">拖入本地文件上传 · 拖动远程文件到另一台 SFTP 标签复制</span></footer>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="profile-dialog" class="profile-dialog">
+      <form id="profile-form" method="dialog" autocomplete="off">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">SSH PROFILE</p>
+            <h2 id="profile-dialog-title">新建连接</h2>
+          </div>
+          <button id="cancel-profile-x" class="icon-button" type="button" aria-label="关闭">×</button>
+        </div>
+
+        <input id="profile-id" type="hidden">
+        <div id="profile-mode" class="profile-mode" role="group" aria-label="添加方式">
+          <button id="profile-mode-single" type="button" aria-pressed="true">单台添加</button>
+          <button id="profile-mode-batch" type="button" aria-pressed="false">批量添加</button>
+        </div>
+        <label id="profile-name-row">
+          <span>显示名称</span>
+          <input id="profile-name" name="name" maxlength="80" placeholder="例如：生产环境 API" required>
+        </label>
+          <label id="profile-host-row" class="host-field">
+            <span>主机</span>
+            <input id="profile-host" name="host" maxlength="253" placeholder="server.example.com" autocapitalize="none" spellcheck="false" required>
+          </label>
+        <label id="profile-batch-row" class="hidden">
+          <span>服务器列表 <span id="profile-batch-count">0 台</span></span>
+          <textarea id="profile-batch-hosts" rows="4" maxlength="40000" placeholder="192.168.1.10&#10;192.168.1.11&#10;生产环境 API,192.168.1.12" spellcheck="false" aria-describedby="profile-batch-help"></textarea>
+          <small id="profile-batch-help" class="form-note">每行一个 IP 或域名，可用「名称,地址」命名。最多 100 台，共用下方用户名、端口与认证方式。</small>
+        </label>
+        <div class="field-grid">
+        <label>
+          <span>用户名</span>
+          <input id="profile-username" name="username" maxlength="64" placeholder="root" autocapitalize="none" spellcheck="false" required>
+        </label>
+        <label>
+          <span>端口</span>
+          <input id="profile-port" name="port" type="number" min="1" max="65535" value="22" required>
+        </label>
+        </div>
+        <fieldset>
+          <legend>认证方式</legend>
+          <div class="auth-options">
+            <label class="auth-card">
+              <input type="radio" name="auth" value="agent" checked>
+              <span><strong>SSH Agent</strong><small>使用 macOS 当前 Agent</small></span>
+            </label>
+            <label class="auth-card">
+              <input type="radio" name="auth" value="key">
+              <span><strong>私钥路径</strong><small>仅保存绝对路径</small></span>
+            </label>
+            <label class="auth-card">
+              <input type="radio" name="auth" value="password">
+              <span><strong>登录密码</strong><small>连接时输入</small></span>
+            </label>
+          </div>
+        </fieldset>
+        <label id="private-key-row" class="private-key-row hidden">
+          <span>私钥绝对路径</span>
+          <div id="private-key-drop" class="private-key-drop">
+            <div class="drop-heading">
+              <span class="drop-icon" aria-hidden="true">↓</span>
+              <span><strong>拖放私钥文件到这里</strong><small id="private-key-feedback" aria-live="polite">仅接受一个本机文件，也可手动输入路径</small></span>
+            </div>
+            <input id="profile-private-key" name="privateKeyPath" maxlength="4096" placeholder="/Users/you/.ssh/id_ed25519" autocapitalize="none" spellcheck="false">
+          </div>
+        </label>
+        <p class="form-note">配置只保存在本机。密码和私钥口令在连接时输入。</p>
+        <p id="form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="cancel-profile" class="ghost-button" type="button">取消</button>
+          <button id="save-profile" class="primary-button" type="submit">保存连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="sftp-secret-dialog" class="secret-dialog">
+      <form id="sftp-secret-form" method="dialog" autocomplete="off">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">SFTP AUTHENTICATION</p>
+            <h2 id="sftp-secret-title">输入临时凭据</h2>
+          </div>
+          <button id="cancel-sftp-secret-x" class="icon-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <label>
+          <span id="sftp-secret-label">密码</span>
+          <input id="sftp-secret" type="password" maxlength="4096" spellcheck="false">
+        </label>
+        <p id="sftp-secret-note" class="form-note">只用于本次连接，不会保存。</p>
+        <div class="dialog-actions">
+          <button id="cancel-sftp-secret" class="ghost-button" type="button">取消</button>
+          <button class="primary-button" type="submit">连接 SFTP</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="folder-dialog" class="secret-dialog" aria-labelledby="folder-title">
+      <form id="folder-form" autocomplete="off">
+        <div class="dialog-heading"><div><p class="eyebrow">NEW FOLDER</p><h2 id="folder-title">新建文件夹</h2></div><button id="folder-cancel-x" type="button" class="icon-button" aria-label="关闭新建文件夹">×</button></div>
+        <label><span>文件夹名称</span><input id="folder-name" required maxlength="255" placeholder="例如：releases" pattern="[^/]+" autocomplete="off"></label>
+        <p id="folder-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button id="folder-cancel" class="ghost-button" type="button">取消</button><button class="primary-button" type="submit">创建文件夹</button></div>
+      </form>
+    </dialog>
+    <div id="notification" class="notification hidden" role="status"><span id="notification-text"></span><button id="notification-close" class="icon-button" type="button" aria-label="关闭提示">×</button></div>
+    <dialog id="copy-dialog" class="secret-dialog" aria-labelledby="copy-title">
+      <form id="copy-form">
+        <div class="dialog-heading"><div><p class="eyebrow">SERVER TO SERVER</p><h2 id="copy-title">复制到另一台服务器</h2></div><button id="copy-cancel-x" type="button" class="icon-button" aria-label="关闭复制窗口">×</button></div>
+        <p id="copy-source" class="form-note"></p>
+        <label><span>目标服务器</span><select id="copy-target" required></select></label>
+        <p id="copy-destination" class="form-note"></p>
+        <p class="form-note">复制到目标标签当前打开的目录，保留原文件。同名文件不会被覆盖。</p>
+        <div class="dialog-actions"><button id="copy-cancel" type="button" class="ghost-button">取消</button><button class="primary-button" type="submit">开始复制</button></div>
+      </form>
+    </dialog>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

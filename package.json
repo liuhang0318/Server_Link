@@ -1,0 +1,78 @@
+{
+  "name": "serverlink",
+  "version": "0.2.4",
+  "private": true,
+  "description": "Security-first macOS SSH client MVP",
+  "main": "main.cjs",
+  "scripts": {
+    "build": "vite build",
+    "prepackage:mac": "npm run build",
+    "package:mac": "node build/package-mac.cjs",
+    "start": "electron .",
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "@electerm/ssh2": "1.22.0",
+    "@xterm/addon-fit": "0.12.0-beta.292",
+    "@xterm/xterm": "6.1.0-beta.292",
+    "node-pty": "1.2.0-beta.15"
+  },
+  "devDependencies": {
+    "electron": "42.8.1",
+    "electron-builder": "26.15.7",
+    "vite": "8.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "build": {
+    "appId": "com.serverlink.desktop",
+    "productName": "ServerLink",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "afterPack": "build/after-pack.cjs",
+    "files": [
+      "dist/**/*",
+      "lib/**/*.cjs",
+      "main.cjs",
+      "preload.cjs",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
+    "npmRebuild": false,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": true,
+      "resetAdHocDarwinSignature": true
+    },
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "identity": null,
+      "minimumSystemVersion": "12.0",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    }
+  }
+}

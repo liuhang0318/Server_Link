@@ -1,0 +1,15 @@
+node_modules/
+dist/
+release/
+build/icon.iconset/
+.DS_Store
+*.log
+.env
+.env.*
+.cache/
+.eslintcache
+secure-data/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
