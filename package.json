@@ -1,6 +1,6 @@
 {
   "name": "serverlink",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "description": "Security-first macOS SSH client MVP",
   "main": "main.cjs",
@@ -34,6 +34,9 @@
       "output": "release"
     },
     "afterPack": "build/after-pack.cjs",
+    "extraResources": [
+      { "from": "build/dock-icon.png", "to": "dock-icon.png" }
+    ],
     "files": [
       "dist/**/*",
       "lib/**/*.cjs",

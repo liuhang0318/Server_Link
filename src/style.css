@@ -74,13 +74,15 @@ input::placeholder { color: #8594a8; }
 .workspace { display: grid; grid-template-rows: 64px minmax(0, 1fr); min-width: 0; min-height: 0; }
 .topbar { display: flex; align-items: center; gap: 16px; padding: 0 20px; border-bottom: 1px solid var(--border); background: #141b24; -webkit-app-region: drag; user-select: none; }
 .session-tabs { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: 100%; overflow-x: auto; -webkit-app-region: drag; }
+.session-tabs { position: relative; }
+.tab-ghost { position: fixed; z-index: 1000; pointer-events: none; margin: 0; background: #30483f !important; color: #d5eee5; border: 1px solid #84bda8; box-shadow: 0 8px 20px #0005; will-change: transform; }
 .session-tabs:empty::before { content: '工作空间'; color: var(--muted); font-size: 13px; }
 .session-tab { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 36px; max-width: 210px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px; color: var(--muted); background: transparent; font-size: 12px; }
 .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-tab:hover { background: var(--surface); }
 .session-tab { cursor: grab; user-select: none; touch-action: none; }
 .session-tabs.sorting, .session-tabs.sorting .session-tab { cursor: grabbing; }
-.session-tab.tab-dragging { opacity: .65; outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-tab.tab-dragging { opacity: .2; outline: 1px dashed var(--accent); outline-offset: -1px; }
 .session-tab.active { border-color: #40584f; color: #d5eee5; background: #24352f; }
 .session-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .status-pill { padding: 5px 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
@@ -184,6 +186,52 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .notification .icon-button { flex-shrink: 0; border: 0; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .hidden { display: none !important; }
+.group-connect { flex-shrink: 0; border: 1px solid #3c5a4c; border-radius: 6px; padding: 4px 6px; background: #233a31; color: var(--accent); font-size: 10px; }
+.files-nav { margin: -10px 0 20px; text-align: left; color: #a9d8c8; }
+.file-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-height: 0; }
+.file-pane, .remote-connected { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.remote-connected { flex: 1; }
+.local-pane { border-right: 1px solid var(--border); background: #171e28; }
+.file-pane .sftp-heading { padding: 18px 14px; }
+.file-pane .sftp-heading h2 { font-size: 19px; }
+.file-pane .sftp-toolbar { padding: 0 12px 12px; gap: 6px; }
+.file-pane .path-form { order: -1; flex-basis: 100%; }
+.file-pane .sftp-table-wrap { margin: 0 12px; }
+.file-pane .sftp-footer { padding: 12px; font-size: 10px; }
+.file-pane .sftp-table th:nth-child(3), .file-pane .sftp-table td:nth-child(3) { display: none; }
+.file-pane .sftp-table th:nth-child(2) { width: 64px; }
+.file-pane .sftp-table th:nth-child(4) { width: 158px; }
+.file-pane .sftp-table td, .file-pane .sftp-table th { padding: 8px; }
+.file-pane .sftp-row-actions .text-button { font-size: 10px; padding: 5px 4px; }
+.file-pane .sftp-name { font-size: 12px; }
+.local-path { order: -1; flex-basis: 100%; width: 0; min-width: 100%; border: 1px solid var(--border); border-radius: 7px; padding: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--muted); }
+.local-options { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 12px 12px; font-size: 11px; color: var(--muted); }
+.local-options label { display: flex; align-items: center; gap: 5px; }
+.local-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.local-table th { position: sticky; top: 0; background: #202936; padding: 12px 7px; text-align: left; color: var(--muted); font-size: 11px; font-weight: 500; }
+.local-table td { padding: 8px 7px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-table th:first-child { width: 32px; }
+.local-table th:nth-child(3) { width: 70px; }
+.local-table th:nth-child(4) { width: 62px; }
+.local-table tr:hover { background: #22303d; }
+.local-table .sftp-name:disabled { opacity: 1; }
+.local-table input, .local-options input, .remote-choice input { accent-color: var(--accent); }
+#local-message:empty { display: none; }
+.remote-empty { display: grid; place-items: center; align-content: center; text-align: center; flex: 1; padding: 20px; }
+.remote-empty .empty-glyph { width: 60px; height: 60px; margin-bottom: 14px; }
+.remote-empty h3 { font-size: 18px; font-weight: 500; }
+.remote-empty p { color: var(--muted); font-size: 12px; line-height: 1.8; margin: 0 0 22px; }
+.remote-choices { display: flex; gap: 6px; overflow-x: auto; padding: 0 12px 12px; flex-shrink: 0; }
+.remote-choices:empty { display: none; }
+.remote-choice { display: flex; align-items: center; flex-shrink: 0; padding: 3px 5px; border: 1px solid var(--border); border-radius: 7px; }
+.remote-choice.active { border-color: #628b7b; background: #263d33; }
+.remote-target { padding: 0 14px 12px; font-size: 11px; }
+.server-options { max-height: 320px; overflow: auto; display: grid; gap: 10px; }
+.server-options label { display: flex; align-items: center; gap: 10px; padding: 10px; background: #151d28; border-radius: 7px; font-size: 13px; }
+#servers-dialog input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.transfer-results { flex-shrink: 0; max-height: 130px; overflow: auto; border-top: 1px solid var(--border); padding: 10px 16px; font-size: 11px; line-height: 1.8; background: #18222b; }
+.transfer-ok { color: #a5dfc9; }
+.transfer-error { color: #f4a3b0; }
 * { scrollbar-width: thin; scrollbar-color: #435267 transparent; }
 @media (max-width: 1050px) {
   .app-shell { grid-template-columns: 260px minmax(0, 1fr); }

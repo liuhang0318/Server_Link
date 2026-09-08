@@ -60,6 +60,7 @@ const state = {
   sftp: null,
   sftpConnections: new Map(),
   sftpActive: false,
+  filesOpen: false,
   sftpBusy: false,
   secretResolve: null,
   sftpConnecting: false,
@@ -74,6 +75,14 @@ let tabPointer = null
 let tabDragFrame = null
 let suppressTabClickUntil = 0
 const expandedProfileGroups = new Set()
+const connectingGroups = new Set()
+const uploadTargets = new Set()
+let localDirectory = null
+let localLoading = false
+let localUploading = false
+let selectingServers = false
+let draggedLocalIds = null
+const localSelection = new Set()
 
 const profileSearch = document.querySelector('#profile-search')
 const folderDialog = document.querySelector('#folder-dialog')
@@ -154,7 +163,13 @@ function renderProfiles () {
       const count = document.createElement('span')
       count.className = 'group-count'
       count.textContent = String(members.length)
-      summary.append(title, count)
+      const connectAll = createButton(connectingGroups.has(group.key) ? '连接中…' : '全部连接', 'group-connect', event => {
+        event.preventDefault()
+        event.stopPropagation()
+        connectProfileGroup(group)
+      }, `连接 ${group.name} 组内全部服务器`)
+      connectAll.disabled = connectingGroups.has(group.key)
+      summary.append(title, count, connectAll)
       details.append(summary)
       // 搜索期间临时展开，不覆盖用户平时的分组展开状态。
       details.addEventListener('toggle', () => {
@@ -210,6 +225,35 @@ function highlightProfile () {
   const profileId = state.sftpActive ? state.sftp?.profileId : state.sessions.get(state.activeSessionId)?.profileId
   for (const item of elements.profileList.querySelectorAll('.profile-item')) item.classList.toggle('selected', item.dataset.profileId === profileId)
   for (const group of elements.profileList.querySelectorAll('.profile-group')) group.classList.toggle('has-active', Boolean(group.querySelector('.profile-item.selected')))
+}
+
+/** 一组只启动一次批次；复用已打开的终端，逐台启动避免界面反复抢焦点。 */
+async function connectProfileGroup (group) {
+  if (connectingGroups.has(group.key)) return
+  connectingGroups.add(group.key)
+  expandedProfileGroups.add(group.key)
+  renderProfiles()
+  let opened = 0
+  let skipped = 0
+  let failed = 0
+  let lastId = null
+  try {
+    for (const profile of group.profiles) {
+      const existing = [...state.sessions.values()].find(item => item.profileId === profile.id && item.status === 'running')
+      if (existing || state.connectingProfiles.has(profile.id)) {
+        skipped++
+        lastId = existing?.id ?? lastId
+        continue
+      }
+      const id = await connectProfile(profile.id, { activate: false, quiet: true })
+      if (id) { opened++; lastId = id } else failed++
+    }
+    if (lastId) activateSession(lastId)
+    notify(`${group.name}：已打开 ${opened} 个终端，复用 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`, failed > 0)
+  } finally {
+    connectingGroups.delete(group.key)
+    renderProfiles()
+  }
 }
 
 async function deleteProfile (profile) {
@@ -432,7 +476,7 @@ function createTerminalSession (sessionId, profile) {
 }
 
 /** 合并连续点击，构建终端失败时释放已启动的原生会话。 */
-async function connectProfile (profileId) {
+async function connectProfile (profileId, { activate = true, quiet = false } = {}) {
   const profile = profileById(profileId)
   if (!profile || state.connectingProfiles.has(profileId)) return
   state.connectingProfiles.add(profileId)
@@ -443,10 +487,12 @@ async function connectProfile (profileId) {
     const result = await api.sessions.start(profileId)
     sessionId = result.sessionId
     createTerminalSession(result.sessionId, profile)
-    activateSession(result.sessionId)
+    if (activate) activateSession(result.sessionId)
+    return result.sessionId
   } catch (error) {
     if (sessionId) await api.sessions.close(sessionId).catch(() => {})
-    notify(errorMessage(error), true)
+    if (!quiet) notify(errorMessage(error), true)
+    return null
   } finally {
     state.connectingProfiles.delete(profileId)
     renderProfiles()
@@ -511,7 +557,7 @@ function setSftpBusy (busy, message = '', connection = state.sftp) {
     button.disabled = busy
   }
   elements.sftpPanel.setAttribute('aria-busy', String(busy))
-  document.querySelector('.sftp-footer').classList.toggle('busy', busy)
+  document.querySelector('#remote-connected .sftp-footer').classList.toggle('busy', busy)
   document.querySelector('#sftp-operation').textContent = busy ? message : '拖入本地文件上传 · 拖动远程文件到另一台 SFTP 标签复制'
   for (const button of elements.sftpFileList.querySelectorAll('button')) button.disabled = busy
   elements.sftpPath.disabled = busy
@@ -611,6 +657,7 @@ async function connectSftp (profileId) {
       operation: ''
     }
     state.sftpConnections.set(result.connectionId, connection)
+    uploadTargets.add(result.connectionId)
     activateSftp(result.connectionId)
     renderSftpFiles()
     notify('文件服务已连接')
@@ -734,17 +781,224 @@ async function removeSftpEntry (remotePath) {
   }
 }
 
+/** 文件工作空间可在未连接远端时打开，先展示本机目录。 */
+function openFileWorkspace () {
+  state.filesOpen = true
+  state.sftpActive = true
+  state.sftp = null
+  state.activeSessionId = null
+  renderTabs()
+  syncWorkspaceState()
+  renderRemoteChoices()
+  if (!localDirectory) loadLocalDirectory(null)
+}
+
+/** 仅使用主进程提供的目录令牌导航，刷新后清空旧选择避免引用过期文件。 */
+async function loadLocalDirectory (id = localDirectory?.id ?? null) {
+  if (localLoading || localUploading) return
+  localLoading = true
+  document.querySelector('#local-message').textContent = '正在读取本机目录…'
+  syncLocalActions()
+  try {
+    localDirectory = await api.local.list(id)
+    localSelection.clear()
+    renderLocalFiles()
+  } catch (error) {
+    document.querySelector('#local-message').textContent = errorMessage(error)
+    notify(errorMessage(error), true)
+  } finally {
+    localLoading = false
+    syncLocalActions()
+  }
+}
+
+function visibleLocalFiles () {
+  return (localDirectory?.entries ?? []).filter(entry => document.querySelector('#local-show-hidden').checked || !entry.name.startsWith('.'))
+}
+
+/** 渲染本地元数据，选择与拖放只携带文件令牌，不传递路径给上传接口。 */
+function renderLocalFiles () {
+  const list = document.querySelector('#local-file-list')
+  list.replaceChildren()
+  if (!localDirectory) return
+  document.querySelector('#local-path').textContent = localDirectory.path
+  document.querySelector('#local-path').title = localDirectory.path
+  const entries = visibleLocalFiles()
+  for (const entry of entries) {
+    const row = document.createElement('tr')
+    const choice = document.createElement('td')
+    if (entry.type === 'file') {
+      const checkbox = document.createElement('input')
+      checkbox.type = 'checkbox'
+      checkbox.checked = localSelection.has(entry.id)
+      checkbox.setAttribute('aria-label', `选择本地文件 ${entry.name}`)
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) localSelection.add(entry.id)
+        else localSelection.delete(entry.id)
+        syncLocalActions()
+      })
+      choice.append(checkbox)
+      row.draggable = true
+      row.addEventListener('dragstart', event => {
+        if (localUploading) return event.preventDefault()
+        draggedLocalIds = localSelection.has(entry.id) ? [...localSelection] : [entry.id]
+        event.dataTransfer.setData('application/x-serverlink-local-files', entry.name)
+        event.dataTransfer.effectAllowed = 'copy'
+      })
+      row.addEventListener('dragend', () => { draggedLocalIds = null })
+    }
+    const name = document.createElement('td')
+    const button = createButton(`${entry.type === 'directory' ? '▸' : '·'} ${entry.name}`, 'sftp-name', () => {}, entry.name)
+    button.title = `${entry.name} · ${entry.modifiedAt}`
+    button.disabled = entry.type !== 'directory'
+    if (entry.type === 'directory') {
+      button.classList.add('directory')
+      button.addEventListener('dblclick', () => loadLocalDirectory(entry.id))
+      button.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); loadLocalDirectory(entry.id) }
+      })
+    }
+    name.append(button)
+    const size = document.createElement('td')
+    size.textContent = entry.type === 'file' ? formatFileSize(entry.size) : '—'
+    const kind = document.createElement('td')
+    kind.textContent = entry.type === 'directory' ? '文件夹' : entry.type === 'file' ? '文件' : '链接/其他'
+    row.append(choice, name, size, kind)
+    list.append(row)
+  }
+  document.querySelector('#local-message').textContent = entries.length ? '' : '此目录为空'
+  syncLocalActions()
+}
+
+function syncLocalActions () {
+  const busy = localLoading || localUploading
+  document.querySelector('#local-parent').disabled = busy || !localDirectory?.parentId
+  document.querySelector('#local-home').disabled = busy
+  document.querySelector('#local-refresh').disabled = busy
+  document.querySelector('#local-show-hidden').disabled = busy
+  for (const checkbox of document.querySelectorAll('#local-file-list input')) checkbox.disabled = busy
+  const selectAll = document.querySelector('#local-select-all')
+  const files = visibleLocalFiles().filter(entry => entry.type === 'file')
+  selectAll.disabled = busy || !files.length
+  selectAll.checked = files.length > 0 && files.every(entry => localSelection.has(entry.id))
+  selectAll.indeterminate = localSelection.size > 0 && !selectAll.checked
+  const button = document.querySelector('#local-upload')
+  button.disabled = busy || !localSelection.size || !uploadTargets.size
+  button.textContent = localUploading ? '正在上传…' : `上传所选${localSelection.size ? ` ${localSelection.size}` : ''}`
+  document.querySelector('#local-count').textContent = `已选 ${localSelection.size} 个文件 · ${uploadTargets.size} 台目标`
+}
+
+/** 在右侧分别提供浏览切换和上传目标勾选，切换目录不改变其他服务器选择。 */
+function renderRemoteChoices () {
+  const choices = document.querySelector('#remote-choices')
+  choices.replaceChildren()
+  for (const connection of state.sftpConnections.values()) {
+    const item = document.createElement('div')
+    item.className = `remote-choice${state.sftp === connection ? ' active' : ''}`
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.checked = uploadTargets.has(connection.connectionId)
+    checkbox.disabled = localUploading
+    checkbox.setAttribute('aria-label', `上传目标 ${connection.title}`)
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) uploadTargets.add(connection.connectionId)
+      else uploadTargets.delete(connection.connectionId)
+      syncLocalActions()
+    })
+    item.append(checkbox, createButton(connection.title.replace(/ · SFTP$/u, ''), 'text-button', () => activateSftp(connection.connectionId)))
+    choices.append(item)
+  }
+  syncLocalActions()
+}
+
+function showServerPicker () {
+  if (state.sftpConnecting || selectingServers || localUploading) return notify('正在连接或传输，请稍候')
+  const list = document.querySelector('#server-options')
+  list.replaceChildren()
+  for (const profile of state.profiles) {
+    const label = document.createElement('label')
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.value = profile.id
+    const existing = [...state.sftpConnections.values()].find(connection => connection.profileId === profile.id)
+    checkbox.checked = Boolean(existing && uploadTargets.has(existing.connectionId))
+    label.append(checkbox, document.createTextNode(`${profile.name}${existing ? ' · 已连接' : ''}`))
+    list.append(label)
+  }
+  if (!state.profiles.length) list.textContent = '请先在左侧添加服务器配置'
+  document.querySelector('#servers-dialog').showModal()
+}
+
+/** 多台依次验证凭据；取消单台或认证失败继续处理其他选择，不保存任何密码。 */
+async function connectSelectedServers (event) {
+  event.preventDefault()
+  const ids = [...document.querySelectorAll('#server-options input:checked')].map(input => input.value)
+  if (!ids.length || ids.length > 20) return notify('请选择 1～20 台服务器', true)
+  document.querySelector('#servers-dialog').close()
+  selectingServers = true
+  const selected = new Set()
+  try {
+    for (const id of ids) {
+      await connectSftp(id)
+      const connection = [...state.sftpConnections.values()].find(item => item.profileId === id)
+      if (connection) selected.add(connection.connectionId)
+    }
+    uploadTargets.clear()
+    for (const id of selected) uploadTargets.add(id)
+    renderRemoteChoices()
+    notify(`已选择 ${selected.size} 台上传目标${ids.length > selected.size ? `，${ids.length - selected.size} 台未连接` : ''}`)
+  } finally {
+    selectingServers = false
+  }
+}
+
+/** 一次上传到勾选的多个目录，主进程逐项返回结果，失败不回滚已成功的文件。 */
+async function uploadLocalSelection (targets = [...state.sftpConnections.values()].filter(item => uploadTargets.has(item.connectionId)), fileIds = [...localSelection]) {
+  if (localUploading || !targets.length || !fileIds.length) return
+  if (targets.some(item => item.busy)) return notify('有目标服务器正在操作，请稍后上传', true)
+  localUploading = true
+  syncLocalActions()
+  renderRemoteChoices()
+  const resultBox = document.querySelector('#transfer-results')
+  resultBox.classList.remove('hidden')
+  resultBox.textContent = `正在将 ${fileIds.length} 个文件上传到 ${targets.length} 台服务器…`
+  for (const target of targets) setSftpBusy(true, `接收本地 ${fileIds.length} 个文件…`, target)
+  try {
+    const results = await api.local.upload(fileIds, targets.map(target => ({ connectionId: target.connectionId, path: target.path })))
+    resultBox.replaceChildren()
+    for (const result of results) {
+      const line = document.createElement('div')
+      const target = targets.find(item => item.connectionId === result.connectionId)
+      line.textContent = `${result.success ? '✓' : '✕'} ${target?.title ?? '服务器'} / ${result.name}${result.success ? '：完成' : `：${result.error}`}`
+      line.className = result.success ? 'transfer-ok' : 'transfer-error'
+      resultBox.append(line)
+    }
+    for (const target of targets) await refreshSftpAfterOperation(target).catch(() => {})
+  } catch (error) {
+    resultBox.textContent = errorMessage(error)
+  } finally {
+    for (const target of targets) setSftpBusy(false, '', target)
+    localUploading = false
+    syncLocalActions()
+    renderRemoteChoices()
+    if (state.sftp) renderSftpFiles()
+  }
+}
+
 /** 恢复每个 SFTP 标签自己的目录及传输状态。 */
 function activateSftp (connectionId = state.sftp?.connectionId) {
   const connection = state.sftpConnections.get(connectionId)
   if (!connection) return
   state.sftp = connection
+  state.filesOpen = true
   state.sftpActive = true
   state.activeSessionId = null
   renderTabs()
   syncWorkspaceState()
   renderSftpFiles()
   setSftpBusy(connection.busy, connection.operation, connection)
+  renderRemoteChoices()
+  if (!localDirectory) loadLocalDirectory(null)
 }
 
 async function closeSftp () {
@@ -752,12 +1006,14 @@ async function closeSftp () {
   if (!connection) return
   if (connection.busy) return notify('请等待当前文件操作完成后再关闭')
   state.sftpConnections.delete(connection.connectionId)
+  uploadTargets.delete(connection.connectionId)
   state.sftp = null
-  state.sftpActive = false
+  state.sftpActive = true
   setSftpBusy(false)
   await api.sftp.close(connection.connectionId).catch(() => {})
   const remainingSftp = [...state.sftpConnections.keys()].at(-1)
   if (remainingSftp) return activateSftp(remainingSftp)
+  if (state.filesOpen) return openFileWorkspace()
   const remainingSessionId = [...state.sessions.keys()].at(-1)
   if (remainingSessionId) activateSession(remainingSessionId)
   else {
@@ -790,7 +1046,7 @@ async function uploadDroppedFiles (connection, files) {
 /** 文件面板和服务器标签共用拖放语义，内部拖拽只读当前窗口记录。 */
 function bindSftpDropTarget (target, getConnection) {
   target.addEventListener('dragover', event => {
-    if (!isFileDrag(event) && !state.draggedRemote) return
+    if (!isFileDrag(event) && !state.draggedRemote && !draggedLocalIds) return
     event.preventDefault()
     const connection = getConnection()
     const allowed = connection && !connection.busy && (!state.draggedRemote || state.draggedRemote.connection !== connection)
@@ -805,7 +1061,9 @@ function bindSftpDropTarget (target, getConnection) {
     target.classList.remove('drop-target')
     const connection = getConnection()
     if (!connection) return
-    if (state.draggedRemote) {
+    if (draggedLocalIds) {
+      uploadLocalSelection([connection], draggedLocalIds)
+    } else if (state.draggedRemote) {
       openCopyDialog(state.draggedRemote, connection)
     } else if (isFileDrag(event)) {
       const items = Array.from(event.dataTransfer.items ?? [])
@@ -873,6 +1131,14 @@ function renderTabs () {
   if (tabPointer) return
   const scrollLeft = elements.tabs.scrollLeft
   elements.tabs.replaceChildren()
+  if (state.filesOpen) {
+    const tab = createButton('本机文件 · SFTP', 'session-tab', openFileWorkspace)
+    tab.dataset.tabKey = 'files:local'
+    tab.setAttribute('role', 'tab')
+    tab.setAttribute('aria-selected', String(state.sftpActive && !state.sftp))
+    tab.classList.toggle('active', state.sftpActive && !state.sftp)
+    elements.tabs.append(tab)
+  }
   for (const session of state.sessions.values()) {
     const tab = createButton(session.title, 'session-tab', () => activateSession(session.id))
     tab.title = `${session.title} · SSH`
@@ -923,15 +1189,28 @@ function updateTabDrag () {
   if (direction) elements.tabs.scrollLeft += direction * 10
   const tabs = [...elements.tabs.children]
   const others = tabs.filter(tab => tab.dataset.tabKey !== drag.key)
+  if (drag.ghost) drag.ghost.style.transform = `translate3d(${drag.x - drag.startX}px, -3px, 0)`
   const target = others.find(tab => {
-    const rect = tab.getBoundingClientRect()
-    return drag.x < rect.left + rect.width / 2
+    // 使用布局坐标而非动画中的视觉坐标，防止让位动画反复触发交换。
+    return drag.x < bounds.left + tab.offsetLeft - elements.tabs.scrollLeft + tab.offsetWidth / 2
   })
   const anchor = target ?? others.at(-1)
   if (anchor) {
-    tabOrder = moveTab(tabOrder, drag.key, anchor.dataset.tabKey, !target)
-    const source = tabs.find(tab => tab.dataset.tabKey === drag.key)
-    if (source) elements.tabs.insertBefore(source, target ?? null)
+    const nextOrder = moveTab(tabOrder, drag.key, anchor.dataset.tabKey, !target)
+    if (nextOrder.some((key, index) => key !== tabOrder[index])) {
+      const before = new Map(others.map(tab => [tab, tab.getBoundingClientRect().left]))
+      for (const tab of others) for (const animation of tab.getAnimations()) animation.cancel()
+      tabOrder = nextOrder
+      const source = tabs.find(tab => tab.dataset.tabKey === drag.key)
+      if (source) elements.tabs.insertBefore(source, target ?? null)
+      // FLIP 仅对让位标签做位移动画；被拖标签由独立浮层实时跟随指针。
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        for (const tab of others) {
+          const delta = before.get(tab) - tab.getBoundingClientRect().left
+          if (delta) tab.animate([{ transform: `translateX(${delta}px)` }, { transform: 'translateX(0)' }], { duration: 180, easing: 'cubic-bezier(.22,1,.36,1)' })
+        }
+      }
+    }
   }
   tabDragFrame = window.requestAnimationFrame(updateTabDrag)
 }
@@ -949,6 +1228,14 @@ function finishTabDrag (cancel = false) {
   if (elements.tabs.hasPointerCapture(drag.pointerId)) elements.tabs.releasePointerCapture(drag.pointerId)
   // 即使期间连接状态发生变化，也只在手势结束后统一重绘最新状态。
   renderTabs()
+  if (drag.ghost) {
+    const target = elements.tabs.querySelector(`[data-tab-key="${drag.key}"]`)
+    if (target && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const delta = target.getBoundingClientRect().left - drag.ghostLeft
+      const animation = drag.ghost.animate([{ transform: drag.ghost.style.transform }, { transform: `translate3d(${delta}px, 0, 0)`, opacity: 0 }], { duration: 150, easing: 'ease-out', fill: 'forwards' })
+      animation.finished.finally(() => drag.ghost.remove())
+    } else drag.ghost.remove()
+  }
 }
 
 function activateSession (sessionId) {
@@ -975,10 +1262,12 @@ function syncWorkspaceState () {
   const session = !state.sftpActive && state.activeSessionId
     ? state.sessions.get(state.activeSessionId)
     : null
-  const hasView = Boolean(session || (state.sftpActive && state.sftp))
+  const hasView = Boolean(session || state.sftpActive)
   elements.emptyState.classList.toggle('hidden', hasView)
   elements.terminalStack.classList.toggle('active', Boolean(session))
-  elements.sftpPanel.classList.toggle('hidden', !state.sftpActive || !state.sftp)
+  elements.sftpPanel.classList.toggle('hidden', !state.sftpActive)
+  document.querySelector('#remote-empty').classList.toggle('hidden', Boolean(state.sftp))
+  document.querySelector('#remote-connected').classList.toggle('hidden', !state.sftp)
   elements.reconnect.disabled = !session
   elements.close.disabled = !hasView
   elements.close.classList.toggle('hidden', !hasView)
@@ -990,7 +1279,7 @@ function syncWorkspaceState () {
     return
   }
   if (!session) {
-    elements.sessionStatus.textContent = '未连接'
+    elements.sessionStatus.textContent = state.sftpActive ? '本机文件' : '未连接'
     elements.sessionStatus.className = 'status-pill'
     return
   }
@@ -1062,6 +1351,14 @@ async function removeSession (session, requestClose) {
 
 async function closeActiveSession () {
   if (state.sftpActive) {
+    if (!state.sftp) {
+      state.filesOpen = false
+      state.sftpActive = false
+      const lastId = [...state.sessions.keys()].at(-1)
+      if (lastId) activateSession(lastId)
+      else { renderTabs(); syncWorkspaceState() }
+      return
+    }
     if (state.sftpBusy) return notify('请等待当前文件操作完成后再关闭')
     await closeSftp()
     return
@@ -1132,7 +1429,21 @@ window.addEventListener('pointermove', event => {
     // 捕获到标签容器，移动越过按钮或窗口边缘仍能结束手势。
     elements.tabs.setPointerCapture(event.pointerId)
     elements.tabs.classList.add('sorting')
-    elements.tabs.querySelector(`[data-tab-key="${drag.key}"]`)?.classList.add('tab-dragging')
+    const source = elements.tabs.querySelector(`[data-tab-key="${drag.key}"]`)
+    if (source) {
+      const rect = source.getBoundingClientRect()
+      drag.ghost = source.cloneNode(true)
+      drag.ghost.classList.add('tab-ghost')
+      drag.ghost.setAttribute('aria-hidden', 'true')
+      drag.ghost.tabIndex = -1
+      drag.ghost.style.left = `${rect.left}px`
+      drag.ghost.style.top = `${rect.top}px`
+      drag.ghost.style.width = `${rect.width}px`
+      drag.ghostLeft = rect.left
+      // 起点以按下位置为准，即使首次 pointermove 跨过多个像素也保持抓取点一致。
+      document.body.append(drag.ghost)
+      source.classList.add('tab-dragging')
+    }
     updateTabDrag()
   }
   if (drag.moved) event.preventDefault()
@@ -1182,7 +1493,28 @@ document.querySelector('#sftp-path-form').addEventListener('submit', event => {
 })
 profileSearch.addEventListener('input', renderProfiles)
 profileSearch.addEventListener('search', renderProfiles)
-bindSftpDropTarget(elements.sftpPanel, () => state.sftp)
+bindSftpDropTarget(document.querySelector('.remote-pane'), () => state.sftp)
+document.querySelector('#open-files').addEventListener('click', openFileWorkspace)
+document.querySelector('#select-servers').addEventListener('click', showServerPicker)
+document.querySelector('#empty-select-servers').addEventListener('click', showServerPicker)
+document.querySelector('#servers-form').addEventListener('submit', connectSelectedServers)
+document.querySelector('#servers-cancel').addEventListener('click', () => document.querySelector('#servers-dialog').close())
+document.querySelector('#servers-cancel-x').addEventListener('click', () => document.querySelector('#servers-dialog').close())
+document.querySelector('#local-home').addEventListener('click', () => loadLocalDirectory(null))
+document.querySelector('#local-parent').addEventListener('click', () => loadLocalDirectory(localDirectory?.parentId))
+document.querySelector('#local-refresh').addEventListener('click', () => loadLocalDirectory())
+document.querySelector('#local-show-hidden').addEventListener('change', () => { localSelection.clear(); renderLocalFiles() })
+document.querySelector('#local-select-all').addEventListener('change', event => {
+  const files = visibleLocalFiles().filter(item => item.type === 'file')
+  if (event.target.checked && files.length > 100) {
+    event.target.checked = false
+    return notify('一次最多选择 100 个文件，请手动选择', true)
+  }
+  localSelection.clear()
+  if (event.target.checked) for (const entry of files) localSelection.add(entry.id)
+  renderLocalFiles()
+})
+document.querySelector('#local-upload').addEventListener('click', () => uploadLocalSelection())
 document.querySelector('#copy-target').addEventListener('change', showCopyDestination)
 document.querySelector('#copy-form').addEventListener('submit', submitRemoteCopy)
 document.querySelector('#copy-cancel').addEventListener('click', () => document.querySelector('#copy-dialog').close())

@@ -13,6 +13,14 @@ const bridge = `
   const profiles = [profile, { ...profile, id: 'preview-staging', name: 'mamo线上1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: 'mamo线上3', host: 'backup.example.com' }];
   const folders = [];
   window.serverLink = {
+    local: {
+      list: async id => ({ id: id || 'local-home', path: id === 'local-folder' ? '/Users/demo/Documents' : '/Users/demo', parentId: id === 'local-folder' ? 'local-home' : null, entries: [
+        { id: 'local-folder', name: 'Documents', type: 'directory', size: 0, modifiedAt: '2026-09-08T02:00:00.000Z' },
+        { id: 'local-file-1', name: 'server-config.json', type: 'file', size: 2048, modifiedAt: '2026-09-08T02:00:00.000Z' },
+        { id: 'local-file-2', name: 'release.tar.gz', type: 'file', size: 4280044, modifiedAt: '2026-09-08T02:00:00.000Z' }
+      ] }),
+      upload: async (ids, targets) => targets.flatMap(target => ids.map(id => ({ connectionId: target.connectionId, name: id === 'local-file-1' ? 'server-config.json' : 'release.tar.gz', success: true })))
+    },
     profiles: {
       list: async () => profiles,
       create: async input => profiles.push({ ...input, id: 'fixture-' + profiles.length }),

@@ -28,7 +28,8 @@ async function createMainHarness () {
     createdWindows: 0,
     quitCalls: 0,
     willQuitEvents: 0,
-    sessionStarts: 0
+    sessionStarts: 0,
+    uploads: []
   }
   let nextWebContentsId = 1
   let resolveSessionCleanup
@@ -104,6 +105,12 @@ async function createMainHarness () {
   class FakeSftpManager {
     closeOwner () {}
     closeAll () {}
+    assertOwned () {}
+    async upload (ownerId, connectionId, remotePath, file) {
+      calls.uploads.push({ ownerId, connectionId, remotePath, file })
+      if (connectionId === 'failure') throw new Error('server unavailable')
+      return { name: path.basename(file) }
+    }
   }
 
   class FakeApp extends EventEmitter {
@@ -168,6 +175,14 @@ async function createMainHarness () {
       if (moduleName === 'electron') return electron
       if (moduleName === './lib/profile-store.cjs') return { ProfileStore: FakeProfileStore }
       if (moduleName === './lib/session-manager.cjs') return { SessionManager: FakeSessionManager }
+      if (moduleName === './lib/local-files.cjs') {
+        return {
+          LocalFiles: class {
+            closeOwner () {}
+            selectedPaths (_ownerId, ids) { return ids.map(id => `/tmp/${id}.txt`) }
+          }
+        }
+      }
       if (moduleName === './lib/sftp-manager.cjs') {
         return { SftpManager: FakeSftpManager, validateRemotePath: value => value }
       }
@@ -263,4 +278,18 @@ test('Dock activation after red-close creates a fresh connectable window', async
   harness.resolveProfile({ id: 'profile-id' })
   assert.deepEqual(await request, { sessionId: 'unused', status: 'running' })
   assert.equal(harness.calls.sessionStarts, 1)
+})
+
+test('local upload fans out to selected servers and reports each file independently', async () => {
+  const harness = await createMainHarness()
+  const sender = harness.windows[0].webContents
+  const invoke = harness.ipcHandlers.get('local:upload')
+  const targets = [{ connectionId: 'failure', path: '/first' }, { connectionId: 'healthy', path: '/second' }]
+  const result = await invoke({ sender, senderFrame: sender.mainFrame }, ['one', 'two'], targets)
+  assert.deepEqual(Array.from(result, item => item.success), [false, false, true, true])
+  assert.equal(harness.calls.uploads.length, 4)
+  assert.equal(harness.calls.uploads[2].ownerId, sender.id)
+  assert.equal(harness.calls.uploads[2].remotePath, '/second')
+  await assert.rejects(invoke({ sender, senderFrame: {} }, ['one'], targets), /untrusted/u)
+  assert.equal(harness.calls.uploads.length, 4)
 })

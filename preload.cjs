@@ -57,6 +57,10 @@ function getPathForDroppedPrivateKey (file) {
 }
 
 const api = Object.freeze({
+  local: Object.freeze({
+    list: (directoryId = null) => ipcRenderer.invoke('local:list', directoryId === null ? null : requireString(directoryId, 'directoryId')),
+    upload: (fileIds, targets) => ipcRenderer.invoke('local:upload', fileIds, targets)
+  }),
   profiles: Object.freeze({
     list: () => ipcRenderer.invoke('profiles:list'),
     /** @param {ProfileInput} profile */

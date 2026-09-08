@@ -5,6 +5,7 @@ const { pathToFileURL } = require('node:url')
 const { app, BrowserWindow, dialog, ipcMain, session } = require('electron')
 const { ProfileStore } = require('./lib/profile-store.cjs')
 const { SessionManager } = require('./lib/session-manager.cjs')
+const { LocalFiles } = require('./lib/local-files.cjs')
 const { SftpManager, validateRemotePath } = require('./lib/sftp-manager.cjs')
 
 const CONTENT_SECURITY_POLICY = [
@@ -27,6 +28,7 @@ const CONTENT_SECURITY_POLICY = [
 let profileStore
 let sessionManager
 let sftpManager
+let localFiles
 let quitPending = false
 let shutdownComplete = false
 let windowsReady = false
@@ -68,6 +70,31 @@ async function confirmNewHost (ownerId, details) {
 
 /** Registers the narrow, typed IPC surface available to the sandboxed UI. */
 function registerIpc () {
+  ipcMain.handle('local:list', (event, directoryId) => localFiles.list(assertMainFrame(event), directoryId))
+  ipcMain.handle('local:upload', async (event, fileIds, targets) => {
+    const ownerId = assertMainFrame(event)
+    const paths = localFiles.selectedPaths(ownerId, fileIds)
+    if (!Array.isArray(targets) || targets.length < 1 || targets.length > 20) throw new Error('请选择 1～20 台目标服务器')
+    if (targets.some(target => !target || typeof target !== 'object') || new Set(targets.map(target => target.connectionId)).size !== targets.length) throw new Error('上传目标无效或重复')
+    const normalized = targets.map(target => {
+      sftpManager.assertOwned(ownerId, target.connectionId)
+      return { connectionId: target.connectionId, path: validateRemotePath(target.path) }
+    })
+    const results = []
+    // 每台服务器独立返回结果；单台或单文件失败不阻断其余已选择的目标。
+    for (const target of normalized) {
+      for (const file of paths) {
+        if (quitPending || event.sender.isDestroyed()) return results
+        try {
+          await sftpManager.upload(ownerId, target.connectionId, target.path, file)
+          results.push({ connectionId: target.connectionId, name: path.basename(file), success: true })
+        } catch (error) {
+          results.push({ connectionId: target.connectionId, name: path.basename(file), success: false, error: error.message })
+        }
+      }
+    }
+    return results
+  })
   ipcMain.handle('profiles:list', event => {
     assertMainFrame(event)
     return profileStore.list()
@@ -247,10 +274,12 @@ function createWindow () {
   window.webContents.on('will-navigate', event => event.preventDefault())
   window.webContents.on('will-attach-webview', event => event.preventDefault())
   window.webContents.on('render-process-gone', () => {
+    localFiles.closeOwner(ownerId)
     sessionManager.closeOwner(ownerId)
     sftpManager.closeOwner(ownerId)
   })
   window.webContents.on('destroyed', () => {
+    localFiles.closeOwner(ownerId)
     sessionManager.closeOwner(ownerId)
     sftpManager.closeOwner(ownerId)
   })
@@ -287,8 +316,13 @@ if (!hasSingleInstanceLock) {
   })
 
   app.whenReady().then(async () => {
+    if (process.platform === 'darwin' && app.isPackaged) {
+      // 仅刷新本应用 Dock 图标，不重启 Dock 或改动系统全局投影设置。
+      app.dock?.setIcon(path.join(process.resourcesPath, 'dock-icon.png'))
+    }
     const privateDataDirectory = path.join(app.getPath('userData'), 'secure-data')
     profileStore = new ProfileStore(privateDataDirectory)
+    localFiles = new LocalFiles(app.getPath('home'))
     sessionManager = new SessionManager({
       knownHostsPath: path.join(privateDataDirectory, 'known_hosts')
     })

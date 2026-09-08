@@ -32,13 +32,9 @@ private func drawIcon() {
     yRadius: 205
   )
 
-  color(0x090d14).setFill()
+  // 使用纯色底，避免深浅渐变被看成残留阴影。
+  color(0x1d3630).setFill()
   base.fill()
-
-  NSGradient(
-    starting: color(0x193631),
-    ending: color(0x090d14)
-  )?.draw(in: base, angle: -52)
 
   color(0xffffff, alpha: 0.10).setStroke()
   base.lineWidth = 5
@@ -117,6 +113,8 @@ private func generateIcon() throws {
     let outputURL = iconsetURL.appendingPathComponent(variant.name)
     try renderPNG(pixels: variant.pixels).write(to: outputURL, options: .atomic)
   }
+  // 单独提供透明 PNG，启动时直接更新 Dock，避开系统对旧 icns 的缓存。
+  try renderPNG(pixels: 512).write(to: buildDirectory.appendingPathComponent("dock-icon.png"), options: .atomic)
 
   // iconutil is the system authority for the required macOS icon names and dimensions.
   let iconutil = Process()

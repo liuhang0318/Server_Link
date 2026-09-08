@@ -67,7 +67,7 @@ test('preload exposes only a validated dropped-File path capability', () => {
     }
   })
 
-  assert.deepEqual(Object.keys(exposedApi).sort(), ['privateKeys', 'profiles', 'sessions', 'sftp'])
+  assert.deepEqual(Object.keys(exposedApi).sort(), ['local', 'privateKeys', 'profiles', 'sessions', 'sftp'])
   assert.deepEqual(Object.keys(exposedApi.privateKeys), ['getPathForFile'])
   assert.deepEqual(Object.keys(exposedApi.sftp).sort(), [
     'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'remove', 'upload', 'uploadFiles'

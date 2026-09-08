@@ -17,6 +17,7 @@
           </div>
         </div>
         <label class="profile-search"><span aria-hidden="true">⌕</span><input id="profile-search" type="search" placeholder="搜索服务器" aria-label="搜索服务器"><kbd>⌘ K</kbd></label>
+        <button id="open-files" class="ghost-button files-nav" type="button">↔ 文件管理 · SFTP</button>
         <div class="sidebar-heading">
           <span>服务器 <span id="profile-count">0</span></span>
           <button id="add-profile" class="icon-button" type="button" aria-label="新增服务器">＋</button>
@@ -48,7 +49,20 @@
         </section>
         <section id="terminal-stack" class="terminal-stack" aria-label="SSH 终端"></section>
         <section id="sftp-panel" class="sftp-panel hidden" aria-label="SFTP 文件管理器">
-          <div class="sftp-heading"><div><p class="eyebrow">REMOTE FILES</p><h2>文件管理</h2></div><span id="sftp-target" class="sftp-meta"></span></div>
+          <div class="file-columns">
+          <section class="file-pane local-pane" aria-label="本机文件">
+            <div class="sftp-heading"><div><p class="eyebrow">LOCAL</p><h2>本机文件</h2></div><button id="local-home" class="ghost-button" type="button">用户目录</button></div>
+            <div class="sftp-toolbar"><button id="local-parent" class="ghost-button" type="button">← 上一级</button><button id="local-refresh" class="ghost-button" type="button">刷新</button><code id="local-path" class="local-path">正在加载…</code></div>
+            <div class="local-options"><label><input id="local-show-hidden" type="checkbox"> 显示隐藏文件</label><button id="local-upload" class="primary-button" type="button" disabled>上传所选</button></div>
+            <div class="sftp-table-wrap"><table class="local-table"><thead><tr><th><input id="local-select-all" type="checkbox" aria-label="选择当前目录文件"></th><th>名称</th><th>大小</th><th>类型</th></tr></thead><tbody id="local-file-list"></tbody></table><p id="local-message" class="sftp-message" role="status"></p></div>
+            <footer class="sftp-footer"><span id="local-count">请选择文件</span><span>双击文件夹打开</span></footer>
+          </section>
+          <section class="file-pane remote-pane" aria-label="远程服务器">
+          <div class="sftp-heading"><div><p class="eyebrow">REMOTE</p><h2>远程文件</h2></div><button id="select-servers" class="ghost-button" type="button">＋ 选择服务器</button></div>
+          <div id="remote-choices" class="remote-choices" aria-label="已连接服务器及上传目标"></div>
+          <div id="remote-empty" class="remote-empty"><div class="empty-glyph">↔</div><h3>选择要管理的服务器</h3><p>支持同时连接多台，勾选目标后<br>可将左侧文件一次上传到多台服务器。</p><button id="empty-select-servers" class="primary-button" type="button">选择服务器 · 可多选</button></div>
+          <div id="remote-connected" class="remote-connected hidden">
+          <span id="sftp-target" class="sftp-meta remote-target"></span>
           <div class="sftp-toolbar">
             <button id="sftp-parent" class="ghost-button" type="button">← 上一级</button>
             <button id="sftp-refresh" class="ghost-button" type="button">刷新</button>
@@ -66,6 +80,10 @@
             <div id="sftp-message" class="sftp-message" aria-live="polite">正在连接…</div>
           </div>
           <footer class="sftp-footer"><span id="sftp-count">0 个项目</span><span id="sftp-operation" role="status">拖入本地文件上传 · 拖动远程文件到另一台 SFTP 标签复制</span></footer>
+          </div>
+          </section>
+          </div>
+          <div id="transfer-results" class="transfer-results hidden" role="status"></div>
         </section>
       </main>
     </div>
@@ -174,6 +192,13 @@
       </form>
     </dialog>
     <div id="notification" class="notification hidden" role="status"><span id="notification-text"></span><button id="notification-close" class="icon-button" type="button" aria-label="关闭提示">×</button></div>
+    <dialog id="servers-dialog" class="secret-dialog" aria-labelledby="servers-title">
+      <form id="servers-form"><div class="dialog-heading"><div><p class="eyebrow">SELECT HOSTS</p><h2 id="servers-title">选择服务器</h2></div><button id="servers-cancel-x" type="button" class="icon-button" aria-label="关闭服务器选择">×</button></div>
+        <p class="form-note">可多选。连接后会成为上传目标，每台服务器独立验证身份。</p>
+        <div id="server-options" class="server-options"></div>
+        <div class="dialog-actions"><button id="servers-cancel" class="ghost-button" type="button">取消</button><button class="primary-button" type="submit">连接所选服务器</button></div>
+      </form>
+    </dialog>
     <dialog id="copy-dialog" class="secret-dialog" aria-labelledby="copy-title">
       <form id="copy-form">
         <div class="dialog-heading"><div><p class="eyebrow">SERVER TO SERVER</p><h2 id="copy-title">复制到另一台服务器</h2></div><button id="copy-cancel-x" type="button" class="icon-button" aria-label="关闭复制窗口">×</button></div>
