@@ -31,6 +31,7 @@
 
       <main class="workspace">
         <header class="topbar">
+          <button id="sidebar-toggle" class="icon-button" type="button" aria-label="隐藏服务器侧栏" aria-expanded="true" title="隐藏服务器侧栏">◧</button>
           <div id="session-tabs" class="session-tabs" role="tablist"></div>
           <div class="session-actions">
             <span id="session-status" class="status-pill">未连接</span>
@@ -49,38 +50,17 @@
         </section>
         <section id="terminal-stack" class="terminal-stack" aria-label="SSH 终端"></section>
         <section id="sftp-panel" class="sftp-panel hidden" aria-label="SFTP 文件管理器">
-          <div class="file-columns">
+          <div class="file-workspace-tools"><span>文件工作空间 · 拖动分隔线调整宽度</span><div><button id="files-scroll-left" class="ghost-button" type="button" aria-label="向左查看文件栏">←</button><button id="files-scroll-right" class="ghost-button" type="button" aria-label="向右查看文件栏">→</button><button id="select-servers" class="ghost-button" type="button">＋ 添加服务器</button></div></div>
+          <div class="file-columns" tabindex="0" aria-label="横向滚动的文件栏">
           <section class="file-pane local-pane" aria-label="本机文件">
             <div class="sftp-heading"><div><p class="eyebrow">LOCAL</p><h2>本机文件</h2></div><button id="local-home" class="ghost-button" type="button">用户目录</button></div>
             <div class="sftp-toolbar"><button id="local-parent" class="ghost-button" type="button">← 上一级</button><button id="local-refresh" class="ghost-button" type="button">刷新</button><code id="local-path" class="local-path">正在加载…</code></div>
             <div class="local-options"><label><input id="local-show-hidden" type="checkbox"> 显示隐藏文件</label><button id="local-upload" class="primary-button" type="button" disabled>上传所选</button></div>
-            <div class="sftp-table-wrap"><table class="local-table"><thead><tr><th><input id="local-select-all" type="checkbox" aria-label="选择当前目录文件"></th><th>名称</th><th>大小</th><th>类型</th></tr></thead><tbody id="local-file-list"></tbody></table><p id="local-message" class="sftp-message" role="status"></p></div>
+            <div class="sftp-table-wrap"><table class="local-table"><thead><tr><th><input id="local-select-all" type="checkbox" aria-label="选择当前目录文件"></th><th>名称</th><th>大小</th><th>类型</th><th>修改时间</th></tr></thead><tbody id="local-file-list"></tbody></table><p id="local-message" class="sftp-message" role="status"></p></div>
             <footer class="sftp-footer"><span id="local-count">请选择文件</span><span>双击文件夹打开</span></footer>
           </section>
-          <section class="file-pane remote-pane" aria-label="远程服务器">
-          <div class="sftp-heading"><div><p class="eyebrow">REMOTE</p><h2>远程文件</h2></div><button id="select-servers" class="ghost-button" type="button">＋ 选择服务器</button></div>
-          <div id="remote-choices" class="remote-choices" aria-label="已连接服务器及上传目标"></div>
-          <div id="remote-empty" class="remote-empty"><div class="empty-glyph">↔</div><h3>选择要管理的服务器</h3><p>支持同时连接多台，勾选目标后<br>可将左侧文件一次上传到多台服务器。</p><button id="empty-select-servers" class="primary-button" type="button">选择服务器 · 可多选</button></div>
-          <div id="remote-connected" class="remote-connected hidden">
-          <span id="sftp-target" class="sftp-meta remote-target"></span>
-          <div class="sftp-toolbar">
-            <button id="sftp-parent" class="ghost-button" type="button">← 上一级</button>
-            <button id="sftp-refresh" class="ghost-button" type="button">刷新</button>
-            <form id="sftp-path-form" class="path-form"><input id="sftp-path" class="sftp-path" value="/" aria-label="远程目录路径" spellcheck="false" autocomplete="off"><button class="text-button" type="submit" title="前往目录">前往</button></form>
-            <button id="sftp-mkdir" class="ghost-button" type="button">新建文件夹</button>
-            <button id="sftp-upload" class="primary-button" type="button">上传文件</button>
-          </div>
-          <div class="sftp-table-wrap">
-            <table class="sftp-table">
-              <thead>
-                <tr><th>名称</th><th>大小</th><th>修改时间</th><th><span class="visually-hidden">操作</span></th></tr>
-              </thead>
-              <tbody id="sftp-file-list"></tbody>
-            </table>
-            <div id="sftp-message" class="sftp-message" aria-live="polite">正在连接…</div>
-          </div>
-          <footer class="sftp-footer"><span id="sftp-count">0 个项目</span><span id="sftp-operation" role="status">拖入本地文件上传 · 拖动远程文件到另一台 SFTP 标签复制</span></footer>
-          </div>
+          <section id="add-server-pane" class="file-pane add-server-pane">
+            <div class="remote-empty"><div class="empty-glyph">＋</div><h3>添加服务器栏</h3><p>每台服务器独立浏览目录<br>左右滚动查看更多服务器</p><button id="empty-select-servers" class="primary-button" type="button">选择服务器 · 可多选</button></div>
           </section>
           </div>
           <div id="transfer-results" class="transfer-results hidden" role="status"></div>
@@ -209,6 +189,16 @@
         <div class="dialog-actions"><button id="copy-cancel" type="button" class="ghost-button">取消</button><button class="primary-button" type="submit">开始复制</button></div>
       </form>
     </dialog>
+    <template id="remote-pane-template">
+      <section class="file-pane remote-pane">
+        <div class="sftp-heading"><div><p class="eyebrow">REMOTE</p><h2 data-role="title"></h2></div><button data-role="close" class="icon-button" type="button" aria-label="关闭服务器文件栏">×</button></div>
+        <span data-role="target" class="sftp-meta remote-target"></span>
+        <div class="sftp-toolbar"><form data-role="pathForm" class="path-form"><input data-role="path" class="sftp-path" aria-label="远程目录路径" spellcheck="false"><button class="text-button" type="submit">前往</button></form><button data-role="parent" class="ghost-button" type="button">← 上一级</button><button data-role="refresh" class="ghost-button" type="button">刷新</button><button data-role="mkdir" class="ghost-button" type="button">新建文件夹</button><button data-role="upload" class="primary-button" type="button">上传文件</button></div>
+        <label class="pane-target"><input data-role="selected" type="checkbox"> 作为本机文件上传目标</label>
+        <div class="sftp-table-wrap"><table class="sftp-table"><thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody data-role="list"></tbody></table><div data-role="message" class="sftp-message" role="status"></div></div>
+        <footer class="sftp-footer" data-role="footer"><span data-role="count"></span><span data-role="operation" role="status"></span></footer>
+      </section>
+    </template>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

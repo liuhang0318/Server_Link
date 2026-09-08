@@ -223,12 +223,19 @@ async function main () {
       let output = ''
       let trustPrompts = 0
       let passwordSent = false
+      let connected = false
       let resolveData
       let resolveExit
       const dataReady = new Promise(resolve => { resolveData = resolve })
       const exited = new Promise(resolve => { resolveExit = resolve })
       const session = manager.start(1, profile, event => {
         if (event.type === 'exit') return resolveExit(event)
+        if (event.type === 'progress') {
+          assert.equal(event.logs.includes(password), false)
+          if (event.phase === 'connected') connected = true
+          if (connected && output.includes('SERVERLINK_PONG')) resolveData()
+          return
+        }
         if (event.type !== 'data') return
         output += event.data
         if (!trustPrompts && output.includes('Are you sure you want to continue connecting')) {
@@ -243,7 +250,7 @@ async function main () {
           manager.resize(1, session.sessionId, 91, 31)
           manager.write(1, session.sessionId, 'ping\r')
         }
-        if (output.includes('SERVERLINK_PONG')) resolveData()
+        if (connected && output.includes('SERVERLINK_PONG')) resolveData()
       })
       const timeout = setTimeout(() => resolveData(new Error(`SSH ${auth} smoke timed out: ${output}`)), 10000)
       try {
@@ -255,6 +262,8 @@ async function main () {
         assert.equal(trustPrompts, expectTrust ? 1 : 0)
         assert.equal(output.includes(password), false)
         assert.match(output, /中文/u)
+        assert.equal(connected, true)
+        await assert.rejects(fs.access(manager.sessions.get(session.sessionId).logDirectory), { code: 'ENOENT' })
         manager.close(1, session.sessionId)
         await exited
         assert.equal(manager.sessions.size, 0)

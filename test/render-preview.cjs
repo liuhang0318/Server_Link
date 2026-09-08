@@ -37,7 +37,9 @@ const bridge = `
       onEvent: callback => { listener = callback; },
       start: async () => {
         const sessionId = 'preview-' + (++sessionCount);
-        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\nsmoketest$ ' }), 100);
+        setTimeout(() => listener({ type: 'progress', sessionId, phase: 'verifying', logs: 'Connection established.\\nChecking server host key.' }), 100);
+        setTimeout(() => listener({ type: 'progress', sessionId, phase: 'connected', logs: 'Authenticated to loopback using publickey.' }), 4000);
+        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\nsmoketest$ ' }), 4100);
         return { sessionId };
       },
       write: async (sessionId, data) => listener({ type: 'data', sessionId, data }),

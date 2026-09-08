@@ -34,13 +34,6 @@ const elements = {
   emptyState: document.querySelector('#empty-state'),
   terminalStack: document.querySelector('#terminal-stack'),
   sftpPanel: document.querySelector('#sftp-panel'),
-  sftpParent: document.querySelector('#sftp-parent'),
-  sftpRefresh: document.querySelector('#sftp-refresh'),
-  sftpPath: document.querySelector('#sftp-path'),
-  sftpMkdir: document.querySelector('#sftp-mkdir'),
-  sftpUpload: document.querySelector('#sftp-upload'),
-  sftpFileList: document.querySelector('#sftp-file-list'),
-  sftpMessage: document.querySelector('#sftp-message'),
   secretDialog: document.querySelector('#sftp-secret-dialog'),
   secretForm: document.querySelector('#sftp-secret-form'),
   secretTitle: document.querySelector('#sftp-secret-title'),
@@ -95,6 +88,7 @@ const saveProfileButton = document.querySelector('#save-profile')
 let batchMode = false
 let batchVisited = false
 let profileSaving = false
+let folderConnection = null
 let notificationTimer
 
 /** 非阻塞反馈保留终端输入焦点；错误需用户关闭，成功提示自动消失。 */
@@ -449,7 +443,37 @@ function createTerminalSession (sessionId, profile) {
   terminal.loadAddon(fitAddon)
   // Consume remote clipboard writes even though no clipboard API is exposed.
   terminal.parser.registerOscHandler(52, () => true)
-  terminal.open(container)
+  const terminalMount = document.createElement('div')
+  terminalMount.className = 'ssh-terminal-mount hidden'
+  const card = document.createElement('div')
+  card.className = 'connection-card'
+  const identity = document.createElement('div')
+  identity.className = 'connection-identity'
+  const icon = document.createElement('span')
+  icon.className = 'connection-icon'
+  icon.textContent = '▤'
+  const details = document.createElement('div')
+  const title = document.createElement('h2')
+  title.textContent = profile.name
+  const address = document.createElement('p')
+  address.textContent = `SSH ${profile.username}@${profile.host}:${profile.port}`
+  details.append(title, address)
+  identity.append(icon, details)
+  const progressRail = document.createElement('div')
+  progressRail.className = 'connection-rail'
+  const progressLabel = document.createElement('p')
+  progressLabel.className = 'connection-phase'
+  progressLabel.setAttribute('role', 'status')
+  const actions = document.createElement('div')
+  const logView = document.createElement('pre')
+  logView.className = 'connection-diagnostics hidden'
+  const logsButton = createButton('显示日志', 'ghost-button', () => {
+    session.showLogs = !session.showLogs
+    syncTerminalPresentation(session)
+  })
+  actions.append(logsButton, createButton('关闭连接', 'ghost-button danger', () => removeSession(session, true)))
+  card.append(identity, progressRail, progressLabel, actions, logView)
+  container.append(card, terminalMount)
 
   const session = {
     id: sessionId,
@@ -459,6 +483,17 @@ function createTerminalSession (sessionId, profile) {
     terminal,
     fitAddon,
     container,
+    terminalMount,
+    card,
+    progressRail,
+    progressLabel,
+    logView,
+    logsButton,
+    phase: 'connecting',
+    connected: false,
+    showLogs: false,
+    opened: false,
+    logs: '',
     inputDisposable: null
   }
   session.inputDisposable = terminal.onData(data => {
@@ -473,6 +508,34 @@ function createTerminalSession (sessionId, profile) {
   state.pendingEvents.delete(sessionId)
   for (const payload of pending) handleSessionEvent(payload)
   return session
+}
+
+/** 进度来自本机 SSH 诊断；PTY 出现提示时显示交互区，确保口令/指纹确认不被遮挡。 */
+function syncTerminalPresentation (session) {
+  const labels = { connecting: '正在连接服务器…', verifying: '正在验证服务器身份…', authenticating: '正在验证登录身份…', connected: '连接成功', failed: '连接失败，请查看日志或重新连接' }
+  session.progressLabel.textContent = session.status === 'exited' ? '连接已结束，请查看日志' : labels[session.phase]
+  session.progressRail.classList.toggle('failed', session.phase === 'failed' || session.status === 'exited')
+  session.card.classList.toggle('hidden', session.connected)
+  session.logView.classList.toggle('hidden', !session.showLogs)
+  session.logView.textContent = session.logs || '正在启动系统 SSH，等待诊断信息…'
+  session.logsButton.textContent = session.showLogs ? '收起日志' : '显示日志'
+  const visible = session.connected || session.showLogs
+  const wasHidden = session.terminalMount.classList.contains('hidden')
+  session.container.classList.toggle('connection-logs-open', !session.connected && session.showLogs)
+  session.terminalMount.classList.toggle('hidden', !visible)
+  if (visible && state.activeSessionId === session.id && !state.sftpActive) {
+    if (!session.opened) {
+      // 终端只在已挂载且可见时初始化，避免批量后台连接生成错误的字符尺寸。
+      session.terminal.open(session.terminalMount)
+      session.opened = true
+    }
+    if (wasHidden) session.terminal.focus()
+    window.requestAnimationFrame(() => {
+      if (state.activeSessionId !== session.id || state.sftpActive || session.terminalMount.classList.contains('hidden')) return
+      session.fitAddon.fit()
+      api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
+    })
+  }
 }
 
 /** 合并连续点击，构建终端失败时释放已启动的原生会话。 */
@@ -545,41 +608,124 @@ function formatFileSize (size) {
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
 }
 
-/** 每台服务器独立记录操作状态，切换标签不丢失传输反馈。 */
-function setSftpBusy (busy, message = '', connection = state.sftp) {
-  if (connection) {
-    connection.busy = busy
-    connection.operation = message
+/** 每个文件栏独立调整宽度；只改布局，不触发目录读取或传输。 */
+function addPaneResize (pane) {
+  const handle = document.createElement('div')
+  handle.className = 'pane-resize'
+  handle.tabIndex = 0
+  handle.setAttribute('role', 'separator')
+  handle.setAttribute('aria-orientation', 'vertical')
+  handle.setAttribute('aria-label', '调整文件栏宽度')
+  handle.setAttribute('aria-valuemin', '360')
+  handle.setAttribute('aria-valuemax', '1100')
+  handle.setAttribute('aria-valuenow', '560')
+  let start = null
+  const setWidth = width => {
+    const bounded = Math.max(360, Math.min(1100, width))
+    pane.style.width = `${bounded}px`
+    handle.setAttribute('aria-valuenow', String(Math.round(bounded)))
   }
-  if (connection !== state.sftp) return
-  state.sftpBusy = busy
-  for (const button of [elements.sftpParent, elements.sftpRefresh, elements.sftpMkdir, elements.sftpUpload]) {
-    button.disabled = busy
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    start = { x: event.clientX, width: pane.getBoundingClientRect().width, pointerId: event.pointerId }
+    handle.setPointerCapture(event.pointerId)
+    pane.classList.add('resizing')
+  })
+  handle.addEventListener('pointermove', event => {
+    if (start?.pointerId === event.pointerId) setWidth(start.width + event.clientX - start.x)
+  })
+  const finish = event => {
+    if (start?.pointerId !== event.pointerId) return
+    start = null
+    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId)
+    pane.classList.remove('resizing')
   }
-  elements.sftpPanel.setAttribute('aria-busy', String(busy))
-  document.querySelector('#remote-connected .sftp-footer').classList.toggle('busy', busy)
-  document.querySelector('#sftp-operation').textContent = busy ? message : '拖入本地文件上传 · 拖动远程文件到另一台 SFTP 标签复制'
-  for (const button of elements.sftpFileList.querySelectorAll('button')) button.disabled = busy
-  elements.sftpPath.disabled = busy
+  handle.addEventListener('pointerup', finish)
+  handle.addEventListener('pointercancel', finish)
+  handle.addEventListener('dblclick', () => setWidth(560))
+  handle.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+    event.preventDefault()
+    setWidth(pane.getBoundingClientRect().width + (event.key === 'ArrowRight' ? 30 : -30))
+  })
+  pane.append(handle)
 }
 
-function renderSftpFiles () {
-  const connection = state.sftp
-  elements.sftpFileList.replaceChildren()
+/** 每个连接创建自己的 DOM 与事件闭包，所有按钮始终操作所属服务器。 */
+function createRemotePane (connection) {
+  const pane = document.querySelector('#remote-pane-template').content.firstElementChild.cloneNode(true)
+  const ui = { pane }
+  for (const node of pane.querySelectorAll('[data-role]')) ui[node.dataset.role] = node
+  connection.ui = ui
+  const name = connection.title.replace(/ · SFTP$/u, '')
+  pane.setAttribute('aria-label', `${name} 文件栏`)
+  ui.title.textContent = name
+  ui.title.title = name
+  ui.selected.setAttribute('aria-label', `上传目标 ${name}`)
+  ui.path.setAttribute('aria-label', `${name} 远程目录路径`)
+  ui.parent.addEventListener('click', () => refreshSftp(connection.path.slice(0, connection.path.lastIndexOf('/')) || '/', connection))
+  ui.refresh.addEventListener('click', () => refreshSftp(connection.path, connection))
+  ui.upload.addEventListener('click', () => uploadSftpFile(connection))
+  ui.mkdir.addEventListener('click', () => createSftpDirectory(connection))
+  ui.close.addEventListener('click', () => closeSftp(connection))
+  ui.pathForm.addEventListener('submit', event => {
+    event.preventDefault()
+    const remotePath = ui.path.value.trim()
+    if (!remotePath.startsWith('/')) return notify('请输入以 / 开头的完整目录路径', true)
+    refreshSftp(remotePath, connection)
+  })
+  ui.selected.addEventListener('change', () => {
+    if (ui.selected.checked) uploadTargets.add(connection.connectionId)
+    else uploadTargets.delete(connection.connectionId)
+    syncLocalActions()
+  })
+  pane.addEventListener('pointerdown', () => {
+    state.sftp = connection
+    state.activeSessionId = null
+    state.sftpActive = true
+    renderRemoteChoices()
+    renderTabs()
+    syncWorkspaceState()
+  })
+  bindSftpDropTarget(pane, () => connection)
+  addPaneResize(pane)
+  document.querySelector('.file-columns').insertBefore(pane, document.querySelector('#add-server-pane'))
+}
+
+/** 每台服务器独立记录操作状态，切换标签不丢失传输反馈。 */
+function setSftpBusy (busy, message = '', connection = state.sftp) {
   if (!connection) return
-  elements.sftpPath.value = connection.path
-  elements.sftpPath.title = connection.path
+  connection.busy = busy
+  connection.operation = message
+  if (connection === state.sftp) state.sftpBusy = busy
+  const ui = connection.ui
+  if (!ui) return
+  ui.pane.setAttribute('aria-busy', String(busy))
+  ui.footer.classList.toggle('busy', busy)
+  ui.operation.textContent = busy ? message : '拖入文件上传 · 横向滚动查看信息'
+  for (const button of [ui.parent, ui.refresh, ui.mkdir, ui.upload, ui.close]) button.disabled = busy
+  for (const button of ui.list.querySelectorAll('button')) button.disabled = busy
+  ui.path.disabled = busy
+}
+
+function renderSftpFiles (connection = state.sftp) {
+  if (!connection?.ui || !state.sftpConnections.has(connection.connectionId)) return
+  const ui = connection.ui
+  ui.list.replaceChildren()
+  ui.path.value = connection.path
+  ui.path.title = connection.path
   const profile = profileById(connection.profileId)
-  document.querySelector('#sftp-target').textContent = profile ? `${profile.username}@${profile.host}` : connection.title
-  document.querySelector('#sftp-count').textContent = `${connection.entries.length} 个项目`
-  elements.sftpParent.disabled = state.sftpBusy || connection.path === '/'
+  ui.target.textContent = profile ? `${profile.username}@${profile.host}` : connection.title
+  ui.count.textContent = `${connection.entries.length} 个项目`
+  ui.parent.disabled = connection.busy || connection.path === '/'
 
   if (connection.entries.length === 0) {
-    elements.sftpMessage.textContent = '这个目录是空的'
-    elements.sftpMessage.classList.remove('hidden')
+    ui.message.textContent = '这个目录是空的'
+    ui.message.classList.remove('hidden')
     return
   }
-  elements.sftpMessage.classList.add('hidden')
+  ui.message.classList.add('hidden')
 
   for (const entry of connection.entries) {
     const remotePath = remoteChildPath(connection.path, entry.name)
@@ -602,7 +748,7 @@ function renderSftpFiles () {
     nameCell.append(createButton(
       `${entry.type === 'directory' ? '▸' : entry.type === 'symlink' ? '↗' : '·'}  ${entry.name}`,
       `sftp-name ${entry.type}`,
-      () => entry.type === 'directory' ? refreshSftp(remotePath) : downloadSftpFile(remotePath),
+      () => entry.type === 'directory' ? refreshSftp(remotePath, connection) : downloadSftpFile(remotePath, connection),
       entry.type === 'directory' ? `打开文件夹 ${entry.name}` : `下载 ${entry.name}`
     ))
     nameCell.firstChild.title = entry.name
@@ -618,15 +764,16 @@ function renderSftpFiles () {
     const actionCell = document.createElement('td')
     actionCell.className = 'sftp-row-actions'
     if (entry.type !== 'directory') {
-      actionCell.append(createButton('下载', 'text-button', () => downloadSftpFile(remotePath), `下载 ${entry.name}`))
+      actionCell.append(createButton('下载', 'text-button', () => downloadSftpFile(remotePath, connection), `下载 ${entry.name}`))
     }
     if (entry.type === 'file') {
       actionCell.append(createButton('复制到…', 'text-button', () => openCopyDialog({ connection, path: remotePath, name: entry.name }), `复制 ${entry.name} 到其他服务器`))
     }
-    actionCell.append(createButton('删除', 'text-button delete', () => removeSftpEntry(remotePath), `删除 ${entry.name}`))
+    actionCell.append(createButton('删除', 'text-button delete', () => removeSftpEntry(remotePath, connection), `删除 ${entry.name}`))
     row.append(nameCell, sizeCell, modifiedCell, actionCell)
-    elements.sftpFileList.append(row)
+    ui.list.append(row)
   }
+  if (connection.busy) for (const button of ui.list.querySelectorAll('button')) button.disabled = true
 }
 
 /** 串行建立文件连接，防止连续点击产生未展示的后台会话。 */
@@ -657,6 +804,7 @@ async function connectSftp (profileId) {
       operation: ''
     }
     state.sftpConnections.set(result.connectionId, connection)
+    createRemotePane(connection)
     uploadTargets.add(result.connectionId)
     activateSftp(result.connectionId)
     renderSftpFiles()
@@ -677,10 +825,9 @@ async function refreshSftpAfterOperation (connection) {
   connection.entries = result.entries
 }
 
-async function refreshSftp (remotePath = state.sftp?.path) {
-  const connection = state.sftp
-  if (!connection || state.sftpBusy || !remotePath) return
-  setSftpBusy(true, '正在读取目录…')
+async function refreshSftp (remotePath = state.sftp?.path, connection = state.sftp) {
+  if (!connection || connection.busy || !remotePath) return
+  setSftpBusy(true, '正在读取目录…', connection)
   try {
     const result = await api.sftp.list(connection.connectionId, remotePath)
     if (!state.sftpConnections.has(connection.connectionId)) return
@@ -690,14 +837,13 @@ async function refreshSftp (remotePath = state.sftp?.path) {
     notify(errorMessage(error), true)
   } finally {
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
-async function uploadSftpFile () {
-  const connection = state.sftp
-  if (!connection || state.sftpBusy) return
-  setSftpBusy(true, '正在上传文件…')
+async function uploadSftpFile (connection = state.sftp) {
+  if (!connection || connection.busy) return
+  setSftpBusy(true, '正在上传文件…', connection)
   try {
     const result = await api.sftp.upload(connection.connectionId, connection.path)
     if (!result.canceled) await refreshSftpAfterOperation(connection)
@@ -706,14 +852,13 @@ async function uploadSftpFile () {
     notify(errorMessage(error), true)
   } finally {
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
-async function downloadSftpFile (remotePath) {
-  const connection = state.sftp
-  if (!connection || state.sftpBusy) return
-  setSftpBusy(true, '正在下载文件…')
+async function downloadSftpFile (remotePath, connection = state.sftp) {
+  if (!connection || connection.busy) return
+  setSftpBusy(true, '正在下载文件…', connection)
   try {
     const result = await api.sftp.download(connection.connectionId, remotePath)
     if (!result.canceled) notify('文件已保存到所选位置')
@@ -721,13 +866,14 @@ async function downloadSftpFile (remotePath) {
     notify(errorMessage(error), true)
   } finally {
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
 /** 使用应用内表单收集名称，Electron 不支持 window.prompt。 */
-function createSftpDirectory () {
-  if (!state.sftp || state.sftpBusy) return
+function createSftpDirectory (connection = state.sftp) {
+  if (!connection || connection.busy) return
+  folderConnection = connection
   folderForm.reset()
   folderError.textContent = ''
   folderDialog.showModal()
@@ -737,8 +883,8 @@ function createSftpDirectory () {
 /** 创建成功才关闭弹窗；失败保留名称，便于修正后重试。 */
 async function submitSftpDirectory (event) {
   event.preventDefault()
-  const connection = state.sftp
-  if (!connection || state.sftpBusy) return
+  const connection = folderConnection
+  if (!connection || connection.busy || !state.sftpConnections.has(connection.connectionId)) return
   const name = folderName.value.trim()
   if (!name || name === '.' || name === '..' || name.includes('/')) {
     folderError.textContent = '请输入有效名称，不能包含 / 或仅为 .、..'
@@ -747,7 +893,7 @@ async function submitSftpDirectory (event) {
   const submit = folderForm.querySelector('[type="submit"]')
   submit.disabled = true
   folderError.textContent = ''
-  setSftpBusy(true, '正在新建文件夹…')
+  setSftpBusy(true, '正在新建文件夹…', connection)
   try {
     await api.sftp.mkdir(connection.connectionId, connection.path, name)
     folderDialog.close()
@@ -759,14 +905,13 @@ async function submitSftpDirectory (event) {
   } finally {
     submit.disabled = false
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
-async function removeSftpEntry (remotePath) {
-  const connection = state.sftp
-  if (!connection || state.sftpBusy) return
-  setSftpBusy(true, '等待删除确认…')
+async function removeSftpEntry (remotePath, connection = state.sftp) {
+  if (!connection || connection.busy) return
+  setSftpBusy(true, '等待删除确认…', connection)
   try {
     // Main process performs its own native confirmation so renderer code can
     // never silently approve a destructive remote operation.
@@ -777,7 +922,7 @@ async function removeSftpEntry (remotePath) {
     notify(errorMessage(error), true)
   } finally {
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
@@ -790,6 +935,7 @@ function openFileWorkspace () {
   renderTabs()
   syncWorkspaceState()
   renderRemoteChoices()
+  document.querySelector('.local-pane').scrollIntoView({ block: 'nearest', inline: 'start', behavior: 'smooth' })
   if (!localDirectory) loadLocalDirectory(null)
 }
 
@@ -863,7 +1009,9 @@ function renderLocalFiles () {
     size.textContent = entry.type === 'file' ? formatFileSize(entry.size) : '—'
     const kind = document.createElement('td')
     kind.textContent = entry.type === 'directory' ? '文件夹' : entry.type === 'file' ? '文件' : '链接/其他'
-    row.append(choice, name, size, kind)
+    const modified = document.createElement('td')
+    modified.textContent = new Date(entry.modifiedAt).toLocaleString('zh-CN', { hour12: false })
+    row.append(choice, name, size, kind, modified)
     list.append(row)
   }
   document.querySelector('#local-message').textContent = entries.length ? '' : '此目录为空'
@@ -888,25 +1036,13 @@ function syncLocalActions () {
   document.querySelector('#local-count').textContent = `已选 ${localSelection.size} 个文件 · ${uploadTargets.size} 台目标`
 }
 
-/** 在右侧分别提供浏览切换和上传目标勾选，切换目录不改变其他服务器选择。 */
+/** 同步各文件栏的目标勾选与高亮，不重建目录内容或改变其他服务器的选择。 */
 function renderRemoteChoices () {
-  const choices = document.querySelector('#remote-choices')
-  choices.replaceChildren()
   for (const connection of state.sftpConnections.values()) {
-    const item = document.createElement('div')
-    item.className = `remote-choice${state.sftp === connection ? ' active' : ''}`
-    const checkbox = document.createElement('input')
-    checkbox.type = 'checkbox'
-    checkbox.checked = uploadTargets.has(connection.connectionId)
-    checkbox.disabled = localUploading
-    checkbox.setAttribute('aria-label', `上传目标 ${connection.title}`)
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) uploadTargets.add(connection.connectionId)
-      else uploadTargets.delete(connection.connectionId)
-      syncLocalActions()
-    })
-    item.append(checkbox, createButton(connection.title.replace(/ · SFTP$/u, ''), 'text-button', () => activateSftp(connection.connectionId)))
-    choices.append(item)
+    if (!connection.ui) continue
+    connection.ui.selected.checked = uploadTargets.has(connection.connectionId)
+    connection.ui.selected.disabled = localUploading
+    connection.ui.pane.classList.toggle('active-pane', state.sftp === connection)
   }
   syncLocalActions()
 }
@@ -981,7 +1117,7 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
     localUploading = false
     syncLocalActions()
     renderRemoteChoices()
-    if (state.sftp) renderSftpFiles()
+    for (const connection of state.sftpConnections.values()) renderSftpFiles(connection)
   }
 }
 
@@ -998,27 +1134,26 @@ function activateSftp (connectionId = state.sftp?.connectionId) {
   renderSftpFiles()
   setSftpBusy(connection.busy, connection.operation, connection)
   renderRemoteChoices()
+  connection.ui.pane.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
   if (!localDirectory) loadLocalDirectory(null)
 }
 
-async function closeSftp () {
-  const connection = state.sftp
+async function closeSftp (connection = state.sftp) {
   if (!connection) return
   if (connection.busy) return notify('请等待当前文件操作完成后再关闭')
+  const wasActive = state.sftp === connection
   state.sftpConnections.delete(connection.connectionId)
   uploadTargets.delete(connection.connectionId)
-  state.sftp = null
-  state.sftpActive = true
-  setSftpBusy(false)
+  connection.ui?.pane.remove()
   await api.sftp.close(connection.connectionId).catch(() => {})
-  const remainingSftp = [...state.sftpConnections.keys()].at(-1)
-  if (remainingSftp) return activateSftp(remainingSftp)
-  if (state.filesOpen) return openFileWorkspace()
-  const remainingSessionId = [...state.sessions.keys()].at(-1)
-  if (remainingSessionId) activateSession(remainingSessionId)
-  else {
+  if (wasActive) {
+    state.sftp = null
+    const remaining = [...state.sftpConnections.keys()].at(-1)
+    if (remaining) activateSftp(remaining)
+    else openFileWorkspace()
+  } else {
     renderTabs()
-    syncWorkspaceState()
+    renderRemoteChoices()
   }
 }
 
@@ -1039,7 +1174,7 @@ async function uploadDroppedFiles (connection, files) {
     notify(errorMessage(error), true)
   } finally {
     setSftpBusy(false, '', connection)
-    if (state.sftp === connection) renderSftpFiles()
+    renderSftpFiles(connection)
   }
 }
 
@@ -1122,7 +1257,7 @@ async function submitRemoteCopy (event) {
   } finally {
     setSftpBusy(false, '', source.connection)
     setSftpBusy(false, '', destination)
-    if (state.sftp) renderSftpFiles()
+    for (const connection of state.sftpConnections.values()) renderSftpFiles(connection)
   }
 }
 
@@ -1248,9 +1383,10 @@ function activateSession (sessionId) {
   renderTabs()
   syncWorkspaceState()
   const session = state.sessions.get(sessionId)
+  syncTerminalPresentation(session)
   window.requestAnimationFrame(() => {
     // SFTP 切换或关闭标签后，旧帧不能重新聚焦隐藏终端或发送错误尺寸。
-    if (state.sftpActive || state.activeSessionId !== sessionId || !state.sessions.has(sessionId)) return
+    if (state.sftpActive || state.activeSessionId !== sessionId || !state.sessions.has(sessionId) || !session.opened || session.terminalMount.classList.contains('hidden')) return
     session.fitAddon.fit()
     api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
     session.terminal.focus()
@@ -1266,8 +1402,6 @@ function syncWorkspaceState () {
   elements.emptyState.classList.toggle('hidden', hasView)
   elements.terminalStack.classList.toggle('active', Boolean(session))
   elements.sftpPanel.classList.toggle('hidden', !state.sftpActive)
-  document.querySelector('#remote-empty').classList.toggle('hidden', Boolean(state.sftp))
-  document.querySelector('#remote-connected').classList.toggle('hidden', !state.sftp)
   elements.reconnect.disabled = !session
   elements.close.disabled = !hasView
   elements.close.classList.toggle('hidden', !hasView)
@@ -1283,7 +1417,7 @@ function syncWorkspaceState () {
     elements.sessionStatus.className = 'status-pill'
     return
   }
-  const labels = { running: '运行中', exited: '已断开', closing: '关闭中' }
+  const labels = { running: session.connected ? '已连接' : '连接中', exited: '已断开', closing: '关闭中' }
   elements.sessionStatus.textContent = labels[session.status] ?? session.status
   elements.sessionStatus.className = `status-pill ${session.status}`
 }
@@ -1301,13 +1435,24 @@ function handleSessionEvent (payload) {
 
   if (payload.type === 'data' && typeof payload.data === 'string') {
     session.terminal.write(payload.data)
+    if (!session.connected && !session.showLogs) {
+      session.showLogs = true
+      syncTerminalPresentation(session)
+    }
     // 终端输出不改变标签状态，避免高频输出重建标签、打断点击及排序。
     return
+  } else if (payload.type === 'progress') {
+    if (!['connecting', 'verifying', 'authenticating', 'connected', 'failed'].includes(payload.phase)) return
+    session.phase = payload.phase
+    session.logs = typeof payload.logs === 'string' ? payload.logs.slice(-16000) : ''
+    if (payload.phase === 'connected') session.connected = true
+    syncTerminalPresentation(session)
   } else if (payload.type === 'status' && payload.status === 'running') {
     session.status = 'running'
   } else if (payload.type === 'exit') {
     session.status = 'exited'
     session.terminal.writeln(`\r\n\x1b[90m[连接已结束，退出码 ${payload.exitCode ?? '未知'}]\x1b[0m`)
+    syncTerminalPresentation(session)
   }
   renderTabs()
   syncWorkspaceState()
@@ -1359,7 +1504,7 @@ async function closeActiveSession () {
       else { renderTabs(); syncWorkspaceState() }
       return
     }
-    if (state.sftpBusy) return notify('请等待当前文件操作完成后再关闭')
+    if (state.sftp?.busy) return notify('请等待当前文件操作完成后再关闭')
     await closeSftp()
     return
   }
@@ -1369,7 +1514,7 @@ async function closeActiveSession () {
 
 const resizeObserver = new window.ResizeObserver(() => {
   const session = state.sessions.get(state.activeSessionId)
-  if (!session) return
+  if (!session?.opened || session.terminalMount.classList.contains('hidden')) return
   session.fitAddon.fit()
   api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
 })
@@ -1473,28 +1618,26 @@ elements.tabs.addEventListener('click', event => {
   }
 }, true)
 elements.close.addEventListener('click', () => closeActiveSession())
-elements.sftpParent.addEventListener('click', () => {
-  const remotePath = state.sftp?.path
-  if (!remotePath || remotePath === '/') return
-  const parentPath = remotePath.slice(0, remotePath.lastIndexOf('/')) || '/'
-  refreshSftp(parentPath)
-})
-elements.sftpRefresh.addEventListener('click', () => refreshSftp())
-elements.sftpUpload.addEventListener('click', uploadSftpFile)
-elements.sftpMkdir.addEventListener('click', createSftpDirectory)
 folderForm.addEventListener('submit', submitSftpDirectory)
 document.querySelector('#folder-cancel').addEventListener('click', () => folderDialog.close())
 document.querySelector('#folder-cancel-x').addEventListener('click', () => folderDialog.close())
-document.querySelector('#sftp-path-form').addEventListener('submit', event => {
-  event.preventDefault()
-  const remotePath = elements.sftpPath.value.trim()
-  if (!remotePath.startsWith('/')) return notify('请输入以 / 开头的完整目录路径', true)
-  refreshSftp(remotePath)
-})
 profileSearch.addEventListener('input', renderProfiles)
 profileSearch.addEventListener('search', renderProfiles)
-bindSftpDropTarget(document.querySelector('.remote-pane'), () => state.sftp)
 document.querySelector('#open-files').addEventListener('click', openFileWorkspace)
+addPaneResize(document.querySelector('.local-pane'))
+document.querySelector('#sidebar-toggle').addEventListener('click', () => {
+  const hidden = document.querySelector('#app').classList.toggle('sidebar-hidden')
+  const button = document.querySelector('#sidebar-toggle')
+  button.setAttribute('aria-expanded', String(!hidden))
+  button.setAttribute('aria-label', hidden ? '展开服务器侧栏' : '隐藏服务器侧栏')
+  button.title = hidden ? '展开服务器侧栏' : '隐藏服务器侧栏'
+})
+for (const [id, direction] of [['files-scroll-left', -1], ['files-scroll-right', 1]]) {
+  document.querySelector(`#${id}`).addEventListener('click', () => {
+    const strip = document.querySelector('.file-columns')
+    strip.scrollBy({ left: direction * 560, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+  })
+}
 document.querySelector('#select-servers').addEventListener('click', showServerPicker)
 document.querySelector('#empty-select-servers').addEventListener('click', showServerPicker)
 document.querySelector('#servers-form').addEventListener('submit', connectSelectedServers)
