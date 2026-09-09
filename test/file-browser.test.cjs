@@ -21,10 +21,10 @@ test('same-directory refresh replaces tokens but preserves selected file names o
   assert.equal(refreshedSelection(previous, { ...next, path: '/another' }, new Set(['old'])).size, 0)
 })
 
-test('shift selection covers visible files in both directions and cannot exceed upload limit', async () => {
+test('shift selection covers visible files and folders in both directions and cannot exceed upload limit', async () => {
   const { selectFileRange } = await import('../src/file-browser.mjs')
   const entries = [{ id: 'a', type: 'file' }, { id: 'folder', type: 'directory' }, { id: 'b', type: 'file' }, { id: 'c', type: 'file' }]
-  assert.deepEqual([...selectFileRange(entries, new Set(), 'a', 'c', true, true)], ['a', 'b', 'c'])
+  assert.deepEqual([...selectFileRange(entries, new Set(), 'a', 'c', true, true)], ['a', 'folder', 'b', 'c'])
   assert.deepEqual([...selectFileRange(entries, new Set(['a', 'b', 'c']), 'c', 'b', false, true)], ['a'])
   const selected = new Set(Array.from({ length: 100 }, (_, i) => `other${i}`))
   assert.equal(selectFileRange(entries, selected, null, 'a', true), selected)

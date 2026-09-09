@@ -6,7 +6,7 @@ import './style.css'
 import { moveTab, tabScrollState } from './tab-order.mjs'
 import { groupProfiles } from './profile-groups.mjs'
 import { connectBatch } from './connection-batch.mjs'
-import { filterFiles, refreshedSelection, selectFileRange } from './file-browser.mjs'
+import { filterFiles, refreshedSelection, selectFileRange, isUploadableEntry } from './file-browser.mjs'
 import { animateSurface } from './motion.mjs'
 
 const api = window.serverLink
@@ -687,6 +687,7 @@ function createRemotePane (connection) {
   ui.parent.addEventListener('click', () => refreshSftp(connection.path.slice(0, connection.path.lastIndexOf('/')) || '/', connection))
   ui.refresh.addEventListener('click', () => refreshSftp(connection.path, connection))
   ui.upload.addEventListener('click', () => uploadSftpFile(connection))
+  ui.cancelUpload.addEventListener('click', () => cancelSftpUpload(connection))
   ui.mkdir.addEventListener('click', () => createSftpDirectory(connection))
   ui.close.addEventListener('click', () => closeSftp(connection))
   ui.retry.addEventListener('click', () => connectSftp(connection.profileId, { activate: false, connection }))
@@ -725,7 +726,15 @@ function setSftpBusy (busy, message = '', connection = state.sftp, resetTransfer
   // 浏览目录不抹掉刚完成的上传结果；只有用户开始新上传才重置进度。
   if (resetTransfer) {
     connection.transfer = null
-    connection.ui?.transfer.classList.add('hidden')
+    connection.uploading = true
+    connection.cancelRequested = false
+    connection.ui?.transfer.classList.remove('hidden')
+    connection.ui?.progress.removeAttribute('value')
+    if (connection.ui) connection.ui.transferLabel.textContent = '正在准备上传…'
+  }
+  if (!busy) {
+    if (connection.uploading && !connection.transfer) connection.ui?.transfer.classList.add('hidden')
+    connection.uploading = false
   }
   if (connection === state.sftp) state.sftpBusy = busy
   const ui = connection.ui
@@ -738,6 +747,25 @@ function setSftpBusy (busy, message = '', connection = state.sftp, resetTransfer
   ui.close.disabled = busy && !unavailable
   for (const button of ui.list.querySelectorAll('button')) button.disabled = busy
   ui.path.disabled = busy || unavailable
+  ui.cancelUpload.classList.toggle('hidden', !connection.uploading)
+  ui.cancelUpload.disabled = !connection.transfer || connection.cancelRequested
+  ui.cancelUpload.textContent = connection.cancelRequested ? '正在终止…' : '终止上传'
+}
+
+/** 终止请求只改变本台批次；等主进程停止流并清理临时文件后才解除忙碌状态。 */
+async function cancelSftpUpload (connection) {
+  if (!connection.uploading || !connection.transfer || connection.cancelRequested) return
+  connection.cancelRequested = true
+  connection.ui.cancelUpload.disabled = true
+  connection.ui.cancelUpload.textContent = '正在终止…'
+  try {
+    await api.sftp.cancelUpload(connection.connectionId)
+  } catch (error) {
+    connection.cancelRequested = false
+    connection.ui.cancelUpload.disabled = false
+    connection.ui.cancelUpload.textContent = '终止上传'
+    notify(errorMessage(error), true)
+  }
 }
 
 /** 进度事件只更新对应文件栏，绝不重建标签或滚动当前视图。 */
@@ -747,11 +775,24 @@ function handleUploadProgress (progress) {
   connection.transfer = progress
   const { ui } = connection
   const percent = progress.phase === 'completed' ? 100 : Math.min(99, Math.floor(progress.transferred * 100 / Math.max(1, progress.total)))
-  const label = progress.phase === 'completed' ? '已完成' : progress.phase === 'failed' ? '上传失败' : progress.phase === 'finalizing' ? '正在确认文件…' : `${percent}%`
+  const terminal = ['completed', 'failed', 'canceled'].includes(progress.phase)
+  const label = progress.phase === 'completed' ? '已完成' : progress.phase === 'canceled' ? '已终止' : progress.phase === 'failed' ? '上传失败' : connection.cancelRequested ? '正在终止并清理…' : progress.phase === 'preparing' ? '正在扫描文件夹…' : progress.phase === 'finalizing' ? '正在确认文件…' : `${percent}%`
   ui.transfer.classList.remove('hidden')
   ui.transfer.classList.toggle('failed', progress.phase === 'failed')
-  ui.progress.value = percent
-  ui.transferLabel.textContent = `${progress.fileIndex}/${progress.fileCount} · ${progress.name} · ${label} · ${formatFileSize(progress.transferred)} / ${formatFileSize(progress.total)}${progress.phase === 'uploading' ? ` · ${formatFileSize(progress.bytesPerSecond)}/s` : ''}`
+  ui.transfer.classList.toggle('canceled', progress.phase === 'canceled')
+  if (progress.phase === 'preparing') ui.progress.removeAttribute('value')
+  else ui.progress.value = percent
+  ui.cancelUpload.classList.toggle('hidden', terminal)
+  ui.cancelUpload.disabled = terminal || connection.cancelRequested
+  ui.transferLabel.textContent = `${progress.fileCount ? `${progress.fileIndex}/${progress.fileCount} · ` : ''}${progress.name || '上传批次'} · ${label} · ${formatFileSize(progress.transferred)} / ${formatFileSize(progress.total)}${progress.phase === 'uploading' ? ` · ${formatFileSize(progress.bytesPerSecond)}/s` : ''}`
+}
+
+/** 各上传入口一致区分失败与主动终止，已发布的项目不会因取消其他项目被撤回。 */
+function reportUploadResults (connection, results) {
+  const failed = results.filter(result => !result.success && !result.canceled)
+  const canceled = results.filter(result => result.canceled)
+  const completed = results.filter(result => result.success).length
+  notify(`${connection.title}：完成 ${completed} 项${canceled.length ? `，终止 ${canceled.length} 项` : ''}${failed.length ? `，失败 ${failed.length} 项：${failed.map(item => `${item.name}（${item.error}）`).join('；')}` : ''}`, failed.length > 0)
 }
 
 function renderSftpFiles (connection = state.sftp) {
@@ -802,10 +843,11 @@ function renderSftpFiles (connection = state.sftp) {
         state.draggedRemote = { connection, path: remotePath, name: entry.name }
         event.dataTransfer.setData('application/x-serverlink-file', entry.name)
         event.dataTransfer.effectAllowed = 'copy'
+        showFileDragPreview(event, row, entry.name)
       })
       row.addEventListener('dragend', () => {
         state.draggedRemote = null
-        document.querySelectorAll('.drop-target').forEach(item => item.classList.remove('drop-target'))
+        clearFileDragFeedback()
       })
     }
     const nameCell = document.createElement('td')
@@ -960,7 +1002,8 @@ async function uploadSftpFile (connection = state.sftp) {
   try {
     const result = await api.sftp.upload(connection.connectionId, connection.path)
     if (!result.canceled) await refreshSftpAfterOperation(connection)
-    if (!result.canceled) notify('上传完成')
+    if (!result.canceled) reportUploadResults(connection, result.results)
+    else connection.ui.transfer.classList.add('hidden')
   } catch (error) {
     notify(errorMessage(error), true)
   } finally {
@@ -1111,7 +1154,7 @@ function renderLocalFiles () {
     const row = document.createElement('tr')
     row.dataset.fileId = entry.id
     const choice = document.createElement('td')
-    if (entry.type === 'file') {
+    if (isUploadableEntry(entry)) {
       const checkbox = document.createElement('input')
       checkbox.type = 'checkbox'
       checkbox.checked = localSelection.has(entry.id)
@@ -1124,8 +1167,9 @@ function renderLocalFiles () {
         draggedLocalIds = localSelection.has(entry.id) ? [...localSelection] : [entry.id]
         event.dataTransfer.setData('application/x-serverlink-local-files', entry.name)
         event.dataTransfer.effectAllowed = 'copy'
+        showFileDragPreview(event, row, entry.name, draggedLocalIds.length)
       })
-      row.addEventListener('dragend', () => { draggedLocalIds = null })
+      row.addEventListener('dragend', () => { draggedLocalIds = null; clearFileDragFeedback() })
     }
     const name = document.createElement('td')
     const button = createButton(`${entry.type === 'directory' ? '▸' : '·'} ${entry.name}`, 'sftp-name', () => {}, entry.name)
@@ -1170,7 +1214,7 @@ function syncLocalActions () {
     row.classList.toggle('file-selected', localSelection.has(row.dataset.fileId))
   }
   const selectAll = document.querySelector('#local-select-all')
-  const files = visibleLocalFiles().filter(entry => entry.type === 'file')
+  const files = visibleLocalFiles().filter(isUploadableEntry)
   selectAll.disabled = busy || !files.length
   selectAll.checked = files.length > 0 && files.every(entry => localSelection.has(entry.id))
   selectAll.indeterminate = files.some(entry => localSelection.has(entry.id)) && !selectAll.checked
@@ -1232,7 +1276,7 @@ async function connectSelectedServers (event) {
   }
 }
 
-/** 一次上传到勾选的多个目录，主进程逐项返回结果，失败不回滚已成功的文件。 */
+/** 每台独立等待并释放忙碌状态；取消/完成一台后无需等待其他服务器，旧批次不改新任务状态。 */
 async function uploadLocalSelection (targets = [...state.sftpConnections.values()].filter(item => uploadTargets.has(item.connectionId)), fileIds = [...localSelection]) {
   if (localUploading || !targets.length || !fileIds.length) return
   if (targets.some(item => item.busy || item.status !== 'ready')) return notify('有目标服务器尚未就绪或正在操作，请稍后上传', true)
@@ -1241,27 +1285,36 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
   renderRemoteChoices()
   const resultBox = document.querySelector('#transfer-results')
   resultBox.classList.remove('hidden')
-  resultBox.textContent = `正在将 ${fileIds.length} 个文件上传到 ${targets.length} 台服务器…`
-  for (const target of targets) setSftpBusy(true, `接收本地 ${fileIds.length} 个文件…`, target, true)
+  const summary = document.createElement('div')
+  summary.textContent = `正在将 ${fileIds.length} 个文件或文件夹上传到 ${targets.length} 台服务器，可在各栏终止…`
+  resultBox.replaceChildren(summary)
+  for (const target of targets) setSftpBusy(true, `接收本地 ${fileIds.length} 个项目…`, target, true)
   try {
-    const results = await api.local.upload(fileIds, targets.map(target => ({ connectionId: target.connectionId, path: target.path })))
-    resultBox.replaceChildren()
-    for (const result of results) {
-      const line = document.createElement('div')
-      const target = targets.find(item => item.connectionId === result.connectionId)
-      line.textContent = `${result.success ? '✓' : '✕'} ${target?.title ?? '服务器'} / ${result.name}${result.success ? '：完成' : `：${result.error}`}`
-      line.className = result.success ? 'transfer-ok' : 'transfer-error'
-      resultBox.append(line)
-    }
-    for (const target of targets) await refreshSftpAfterOperation(target).catch(() => {})
-  } catch (error) {
-    resultBox.textContent = errorMessage(error)
+    await Promise.all(targets.map(async target => {
+      try {
+        const results = await api.local.upload(fileIds, [{ connectionId: target.connectionId, path: target.path }])
+        for (const result of results) {
+          const line = document.createElement('div')
+          line.textContent = `${result.success ? '✓' : result.canceled ? '−' : '✕'} ${target.title} / ${result.name}${result.success ? '：完成' : result.canceled ? '：已终止' : `：${result.error}`}`
+          line.className = result.success ? 'transfer-ok' : result.canceled ? 'transfer-canceled' : 'transfer-error'
+          resultBox.append(line)
+        }
+        await refreshSftpAfterOperation(target).catch(() => {})
+      } catch (error) {
+        const line = document.createElement('div')
+        line.className = 'transfer-error'
+        line.textContent = `${target.title}：${errorMessage(error)}`
+        resultBox.append(line)
+      } finally {
+        setSftpBusy(false, '', target)
+        renderSftpFiles(target)
+      }
+    }))
   } finally {
-    for (const target of targets) setSftpBusy(false, '', target)
     localUploading = false
     syncLocalActions()
     renderRemoteChoices()
-    for (const connection of state.sftpConnections.values()) renderSftpFiles(connection)
+    summary.textContent = '上传批次已结束；已完成的项目保留，已终止的项目可重新上传。'
   }
 }
 
@@ -1314,15 +1367,13 @@ async function closeSftp (connection = state.sftp) {
 /** 本地多文件拖放逐项反馈结果；标签切换后仍刷新原来的目标目录。 */
 async function uploadDroppedFiles (connection, files) {
   if (!connection || connection.busy || connection.status !== 'ready') return notify('目标服务器尚未就绪或正在执行文件操作，请稍后再试')
-  if (!files.length || files.length > 100) return notify('请一次拖入 1～100 个普通文件', true)
-  setSftpBusy(true, `正在上传 ${files.length} 个文件…`, connection, true)
-  notify(`开始上传 ${files.length} 个文件 → ${connection.title} ${connection.path}`)
+  if (!files.length || files.length > 100) return notify('请一次拖入 1～100 个文件或文件夹', true)
+  setSftpBusy(true, `正在上传 ${files.length} 个项目…`, connection, true)
+  notify(`开始上传 ${files.length} 个项目 → ${connection.title} ${connection.path}`)
   try {
     // File 由预加载层解析真实路径，渲染层不拼装任何本地文件路径。
     const results = await api.sftp.uploadFiles(connection.connectionId, connection.path, files)
-    const failed = results.filter(result => !result.success)
-    if (failed.length) notify(`成功 ${results.length - failed.length}，失败 ${failed.length}：${failed.map(item => `${item.name}（${item.error}）`).join('；')}`, true)
-    else notify(`${results.length} 个文件上传完成 → ${connection.title}`)
+    reportUploadResults(connection, results)
     await refreshSftpAfterOperation(connection)
   } catch (error) {
     notify(errorMessage(error), true)
@@ -1332,7 +1383,27 @@ async function uploadDroppedFiles (connection, files) {
   }
 }
 
-/** 文件面板和服务器标签共用拖放语义，内部拖拽只读当前窗口记录。 */
+/** 拖动使用轻量原生预览，不截取整张宽表格，源行和目标栏都有明确视觉反馈。 */
+function showFileDragPreview (event, row, name, count = 1) {
+  const preview = document.createElement('div')
+  preview.className = 'file-drag-preview'
+  preview.textContent = `${count > 1 ? `${count} 个项目` : name}  →  复制 / 上传`
+  preview.style.left = `${event.clientX}px`
+  preview.style.top = `${event.clientY}px`
+  preview.setAttribute('aria-hidden', 'true')
+  document.body.append(preview)
+  event.dataTransfer.setDragImage(preview, 18, 18)
+  row.classList.add('file-dragging')
+  window.requestAnimationFrame(() => preview.remove())
+}
+
+/** 清理只作用于拖拽表现，不清空已选文件或传输中的批次。 */
+function clearFileDragFeedback () {
+  for (const item of document.querySelectorAll('.drop-target, .drop-rejected, .file-dragging')) item.classList.remove('drop-target', 'drop-rejected', 'file-dragging')
+  for (const preview of document.querySelectorAll('.file-drag-preview')) preview.remove()
+}
+
+/** 文件栏和服务器标签共用拖放语义；子节点之间移动不闪烁，落点再次校验可用性。 */
 function bindSftpDropTarget (target, getConnection) {
   target.addEventListener('dragover', event => {
     if (!isFileDrag(event) && !state.draggedRemote && !draggedLocalIds) return
@@ -1341,22 +1412,23 @@ function bindSftpDropTarget (target, getConnection) {
     const allowed = connection && connection.status === 'ready' && !connection.busy && (!state.draggedRemote || state.draggedRemote.connection !== connection)
     event.dataTransfer.dropEffect = allowed ? 'copy' : 'none'
     target.classList.toggle('drop-target', Boolean(allowed))
+    target.classList.toggle('drop-rejected', !allowed)
+    target.dataset.dropMessage = allowed ? `${state.draggedRemote ? '松开以复制到' : '松开以上传文件或文件夹到'}\n${connection.title}\n${connection.path}` : connection?.busy ? '此服务器正在传输，请等待完成或终止当前上传' : '此处暂不可接收文件'
   })
   target.addEventListener('dragleave', event => {
-    if (!target.contains(event.relatedTarget)) target.classList.remove('drop-target')
+    const bounds = target.getBoundingClientRect()
+    if (!target.contains(event.relatedTarget) && (event.clientX <= bounds.left || event.clientX >= bounds.right || event.clientY <= bounds.top || event.clientY >= bounds.bottom)) target.classList.remove('drop-target', 'drop-rejected')
   })
   target.addEventListener('drop', event => {
     event.preventDefault()
-    target.classList.remove('drop-target')
+    clearFileDragFeedback()
     const connection = getConnection()
-    if (!connection) return
+    if (!connection || connection.status !== 'ready' || connection.busy || state.draggedRemote?.connection === connection) return notify('该目标暂不可接收文件', true)
     if (draggedLocalIds) {
       uploadLocalSelection([connection], draggedLocalIds)
     } else if (state.draggedRemote) {
       openCopyDialog(state.draggedRemote, connection)
     } else if (isFileDrag(event)) {
-      const items = Array.from(event.dataTransfer.items ?? [])
-      if (items.some(item => item.webkitGetAsEntry?.()?.isDirectory)) return notify('请拖入普通文件；文件夹可先压缩再上传', true)
       uploadDroppedFiles(connection, Array.from(event.dataTransfer.files))
     }
   })
@@ -1773,6 +1845,9 @@ elements.privateKeyDrop.addEventListener('drop', selectDroppedPrivateKey)
 // the whole window, including when the user misses the visible drop zone.
 window.addEventListener('dragover', preventFileDropNavigation, { capture: true })
 window.addEventListener('drop', preventFileDropNavigation, { capture: true })
+window.addEventListener('drop', clearFileDragFeedback, { capture: true })
+window.addEventListener('dragend', clearFileDragFeedback)
+window.addEventListener('blur', clearFileDragFeedback)
 elements.reconnect.addEventListener('click', () => reconnectActiveSession())
 elements.tabs.addEventListener('pointerdown', event => {
   const tab = event.target.closest('.session-tab')
@@ -1864,7 +1939,7 @@ document.querySelector('#local-show-hidden').addEventListener('change', renderLo
 document.querySelector('#local-filter').addEventListener('input', renderLocalFiles)
 document.querySelector('#local-filter').addEventListener('search', renderLocalFiles)
 document.querySelector('#local-select-all').addEventListener('change', event => {
-  const files = visibleLocalFiles().filter(item => item.type === 'file')
+  const files = visibleLocalFiles().filter(isUploadableEntry)
   if (event.target.checked && files.length > 100) {
     event.target.checked = false
     return notify('一次最多选择 100 个文件，请手动选择', true)

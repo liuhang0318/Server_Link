@@ -16,7 +16,7 @@ const { SftpManager } = require(path.join(sourceRoot, 'lib/sftp-manager.cjs'))
 const { trustKnownHost } = require(path.join(sourceRoot, 'lib/known-hosts.cjs'))
 
 /** Serves a tiny SFTP filesystem confined to the disposable smoke directory. */
-function attachSftp (sftp, rootDirectory) {
+function attachSftp (sftp, rootDirectory, controls = {}) {
   const { STATUS_CODE } = utils.sftp
   const openFiles = new Map()
   const openDirectories = new Map()
@@ -80,12 +80,16 @@ function attachSftp (sftp, rootDirectory) {
     }))).then(entries => sftp.name(requestId, entries))
   })
   sftp.on('OPEN', (requestId, remotePath, flags) => {
-    callbackFs.open(localPath(remotePath), utils.sftp.flagsToString(flags), (error, descriptor) => {
-      if (error) return fail(requestId, error)
-      const handle = Buffer.from(`file-${++handleCount}`)
-      openFiles.set(handle.toString(), descriptor)
-      sftp.handle(requestId, handle)
-    })
+    // 延迟 OPEN 回执专门覆盖取消发生在远端临时文件尚未打开的窗口。
+    controls.beforeOpen?.()
+    setTimeout(() => {
+      callbackFs.open(localPath(remotePath), utils.sftp.flagsToString(flags), (error, descriptor) => {
+        if (error) return fail(requestId, error)
+        const handle = Buffer.from(`file-${++handleCount}`)
+        openFiles.set(handle.toString(), descriptor)
+        sftp.handle(requestId, handle)
+      })
+    }, controls.openDelay || 0)
   })
   sftp.on('READ', (requestId, handle, offset, length) => {
     const descriptor = openFiles.get(handle.toString())
@@ -102,18 +106,24 @@ function attachSftp (sftp, rootDirectory) {
     if (descriptor === undefined) return sftp.status(requestId, STATUS_CODE.FAILURE)
     callbackFs.write(descriptor, data, 0, data.length, offset, error => {
       if (error) return fail(requestId, error)
-      sftp.status(requestId, STATUS_CODE.OK)
+      setTimeout(() => sftp.status(requestId, STATUS_CODE.OK), controls.writeDelay || 0)
     })
   })
   sftp.on('FSETSTAT', (requestId, handle, attrs) => {
     callbackFs.fchmod(openFiles.get(handle.toString()), attrs.mode, error => error ? fail(requestId, error) : sftp.status(requestId, STATUS_CODE.OK))
   })
   sftp.on('RENAME', (requestId, from, to) => {
-    // link 独占创建目标，模拟 SFTP v3 的禁止覆盖语义。
-    callbackFs.link(localPath(from), localPath(to), error => {
-      if (error) return fail(requestId, error)
-      callbackFs.unlink(localPath(from), error => error ? fail(requestId, error) : sftp.status(requestId, STATUS_CODE.OK))
-    })
+    // 文件用 link 模拟独占发布；目录仅在隔离 fixture 中检查目标缺失后 rename。
+    fs.lstat(localPath(from)).then(async stat => {
+      if (stat.isDirectory()) {
+        await assert.rejects(fs.lstat(localPath(to)), { code: 'ENOENT' })
+        await fs.rename(localPath(from), localPath(to))
+      } else {
+        await fs.link(localPath(from), localPath(to))
+        await fs.unlink(localPath(from))
+      }
+      sftp.status(requestId, STATUS_CODE.OK)
+    }).catch(error => fail(requestId, error))
   })
   sftp.on('CLOSE', (requestId, handle) => {
     const key = handle.toString()
@@ -158,6 +168,7 @@ async function main () {
     }))
   })
   let resizeReceived = false
+  const transferControls = {}
   const server = new Server({ hostKeys: [hostKey.private] }, client => {
     clients.add(client)
     client.on('close', () => clients.delete(client))
@@ -187,7 +198,7 @@ async function main () {
             if (data.toString().includes('ping')) shell.write('SERVERLINK_PONG\r\n')
           })
         })
-        session.on('sftp', accept => attachSftp(accept(), sftpRoot))
+        session.on('sftp', accept => attachSftp(accept(), sftpRoot, transferControls))
       })
     })
   })
@@ -309,6 +320,47 @@ async function main () {
     assert.equal(await fs.readFile(path.join(secondRoot, 'upload-source.txt'), 'utf8'), transferBody)
     await assert.rejects(sftpManager.copyBetween(2, sftpConnectionId, '/upload-source.txt', destinationId, '/'), /同名/u)
     await assert.rejects(sftpManager.upload(2, sftpConnectionId, '/', uploadSource), /同名/u)
+    const folderSource = path.join(directory, 'folder-source')
+    await fs.mkdir(path.join(folderSource, 'nested', 'empty'), { recursive: true })
+    await fs.writeFile(path.join(folderSource, 'nested', 'content.txt'), 'FOLDER_OK 中文')
+    const [folderResult] = await sftpManager.uploadBatch(2, sftpConnectionId, '/', [folderSource])
+    assert.equal(folderResult.success, true)
+    assert.equal(await fs.readFile(path.join(sftpRoot, 'folder-source', 'nested', 'content.txt'), 'utf8'), 'FOLDER_OK 中文')
+    assert.equal((await fs.stat(path.join(sftpRoot, 'folder-source', 'nested', 'empty'))).isDirectory(), true)
+
+    const canceledSource = path.join(directory, 'canceled.bin')
+    const queuedSource = path.join(directory, 'queued.txt')
+    await fs.writeFile(canceledSource, Buffer.alloc(4 * 1024 * 1024))
+    await fs.writeFile(queuedSource, 'must not start')
+    const canceledEvents = []
+    transferControls.writeDelay = 8
+    const canceledResults = await sftpManager.uploadBatch(2, sftpConnectionId, '/', [canceledSource, queuedSource], event => {
+      canceledEvents.push(event)
+      if (event.phase === 'uploading' && event.transferred > 0) sftpManager.cancelUpload(2, sftpConnectionId)
+    })
+    transferControls.writeDelay = 0
+    assert.ok(canceledResults.every(result => result.canceled))
+    assert.equal(canceledEvents.at(-1).phase, 'canceled')
+    assert.ok(canceledEvents.some(event => event.transferred > 0))
+    await assert.rejects(fs.lstat(path.join(sftpRoot, 'canceled.bin')), { code: 'ENOENT' })
+    await assert.rejects(fs.lstat(path.join(sftpRoot, 'queued.txt')), { code: 'ENOENT' })
+
+    // 中止发生在 OPEN 回执之前；退出必须等句柄关闭和暂存清理，不能漏 .part。
+    const canceledFolder = path.join(directory, 'canceled-folder')
+    await fs.mkdir(path.join(canceledFolder, 'nested', 'empty'), { recursive: true })
+    await fs.writeFile(path.join(canceledFolder, 'nested', 'file.txt'), 'never published')
+    transferControls.openDelay = 100
+    transferControls.beforeOpen = () => {
+      transferControls.beforeOpen = null
+      sftpManager.cancelUpload(2, sftpConnectionId)
+    }
+    const [openCanceled] = await sftpManager.uploadBatch(2, sftpConnectionId, '/', [canceledFolder])
+    transferControls.openDelay = 0
+    assert.equal(openCanceled.canceled, true)
+    await assert.rejects(fs.lstat(path.join(sftpRoot, 'canceled-folder')), { code: 'ENOENT' })
+    assert.ok((await fs.readdir(sftpRoot)).every(name => !name.endsWith('.part')))
+    assert.ok((await sftpManager.list(2, sftpConnectionId, '/')).entries.some(entry => entry.name === 'welcome.txt'))
+    console.log('folder-upload: structure/empty folders, stream/queued/pre-OPEN cancellation, cleanup and connection reuse passed')
     await assert.rejects(sftpManager.copyBetween(3, sftpConnectionId, '/upload-source.txt', destinationId, '/'), /not found/u)
     assert.ok((await fs.readdir(secondRoot)).every(name => !name.endsWith('.part')))
     sftpManager.close(2, destinationId)

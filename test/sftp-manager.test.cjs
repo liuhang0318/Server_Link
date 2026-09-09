@@ -171,7 +171,8 @@ test('upload progress counts acknowledged bytes and completes only after publish
     assert.equal(events[0].transferred, 0)
     assert.equal(events.at(-1).phase, 'completed')
     assert.equal(events.at(-1).transferred, size)
-    assert.ok(events.every(event => event.connectionId === connectionId && event.total === size && !JSON.stringify(event).includes(directory)))
+    assert.equal(events[0].phase, 'preparing')
+    assert.ok(events.every(event => event.connectionId === connectionId && (event.phase === 'preparing' || event.total === size) && !JSON.stringify(event).includes(directory)))
     if (size) assert.ok(events.some(event => event.transferred > 0 && event.transferred < size))
     for (let i = 1; i < events.length; i++) assert.ok(events[i].transferred >= events[i - 1].transferred)
   }

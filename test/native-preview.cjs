@@ -145,6 +145,8 @@ class SftpManager {
   }
 
   cancelConnect () {}
+  cancelUpload (ownerId, id) { this.assertOwned(ownerId, id); return false }
+  async uploadBatch () { throw new Error('隔离快捷键验收不提供本机文件传输') }
   closeOwner (ownerId) {
     for (const [id, owner] of this.connections) if (owner === ownerId) this.connections.delete(id)
   }

@@ -105,10 +105,10 @@ async function confirmNewHost (ownerId, details) {
 }
 
 /** 为本次上传绑定窗口及批次序号，所有上传入口复用同一进度通道。 */
-function uploadProgress (sender, fileIndex = 1, fileCount = 1) {
+function uploadProgress (sender) {
   // 只向发起上传的窗口推送元数据，不广播文件路径，也不让已销毁窗口的通知打断传输清理。
   return progress => {
-    if (!quitPending && !sender.isDestroyed()) sender.send('sftp:progress', { ...progress, fileIndex, fileCount })
+    if (!quitPending && !sender.isDestroyed()) sender.send('sftp:progress', progress)
   }
 }
 
@@ -124,20 +124,16 @@ function registerIpc () {
       sftpManager.assertOwned(ownerId, target.connectionId)
       return { connectionId: target.connectionId, path: validateRemotePath(target.path) }
     })
-    const results = []
-    // 每台服务器独立返回结果；单台或单文件失败不阻断其余已选择的目标。
-    for (const target of normalized) {
-      for (const [index, file] of paths.entries()) {
-        if (quitPending || event.sender.isDestroyed()) return results
-        try {
-          await sftpManager.upload(ownerId, target.connectionId, target.path, file, uploadProgress(event.sender, index + 1, paths.length))
-          results.push({ connectionId: target.connectionId, name: path.basename(file), success: true })
-        } catch (error) {
-          results.push({ connectionId: target.connectionId, name: path.basename(file), success: false, error: error.message })
-        }
+    // 每台目标从一开始就拥有可取消的批次，停止一台不影响其他目标；目标数已限制为 20。
+    return (await Promise.all(normalized.map(async target => {
+      if (quitPending || event.sender.isDestroyed()) return []
+      try {
+        const results = await sftpManager.uploadBatch(ownerId, target.connectionId, target.path, paths, uploadProgress(event.sender))
+        return results.map(result => ({ ...result, connectionId: target.connectionId }))
+      } catch (error) {
+        return paths.map(file => ({ connectionId: target.connectionId, name: path.basename(file), success: false, error: error.message }))
       }
-    }
-    return results
+    }))).flat()
   })
   ipcMain.handle('profiles:list', event => {
     assertMainFrame(event)
@@ -202,6 +198,7 @@ function registerIpc () {
     sftpManager.list(assertMainFrame(event), connectionId, remotePath)
   ))
   ipcMain.handle('sftp:cancel-connect', (event, profileId) => sftpManager.cancelConnect(assertMainFrame(event), profileId))
+  ipcMain.handle('sftp:cancel-upload', (event, connectionId) => sftpManager.cancelUpload(assertMainFrame(event), connectionId))
   ipcMain.handle('sftp:upload-files', async (event, connectionId, remoteDirectory, paths) => {
     const ownerId = assertMainFrame(event)
     sftpManager.assertOwned(ownerId, connectionId)
@@ -209,18 +206,9 @@ function registerIpc () {
     if (!Array.isArray(paths) || paths.length < 1 || paths.length > 100 || paths.some(file => typeof file !== 'string')) {
       throw new TypeError('invalid dropped files')
     }
-    const results = []
-    // 单批串行传输，逐项报告成功和失败；关闭窗口后不再启动后续上传。
-    for (const [index, file] of paths.entries()) {
-      if (quitPending || event.sender.isDestroyed()) break
-      try {
-        const result = await sftpManager.upload(ownerId, connectionId, remoteDirectory, file, uploadProgress(event.sender, index + 1, paths.length))
-        results.push({ name: result.name, success: true })
-      } catch (error) {
-        results.push({ name: path.basename(file), success: false, error: error.message })
-      }
-    }
-    return results
+    if (quitPending || event.sender.isDestroyed()) throw new Error('SFTP connection unavailable')
+    // 文件和文件夹共用扫描、进度、取消与同名保护，主进程不再逐文件拆成不可整体取消的调用。
+    return sftpManager.uploadBatch(ownerId, connectionId, remoteDirectory, paths, uploadProgress(event.sender))
   })
   ipcMain.handle('sftp:copy-between', (event, sourceId, sourcePath, destinationId, destinationDirectory) => {
     // manager 同时检查源和目标的窗口归属，不开放任意 SSH 命令或额外网络连接。
@@ -235,12 +223,12 @@ function registerIpc () {
     // Selecting the local source in the trusted main process prevents the
     // sandboxed renderer from supplying an arbitrary readable filesystem path.
     const selection = await dialog.showOpenDialog(window, {
-      title: '选择要上传的文件',
-      properties: ['openFile']
+      title: '选择要上传的文件或文件夹',
+      properties: ['openFile', 'openDirectory', 'multiSelections']
     })
-    if (selection.canceled || selection.filePaths.length !== 1) return { canceled: true }
+    if (selection.canceled || !selection.filePaths.length) return { canceled: true }
     if (quitPending || sender.isDestroyed()) throw new Error('SFTP connection unavailable')
-    return sftpManager.upload(ownerId, connectionId, remoteDirectory, selection.filePaths[0], uploadProgress(sender))
+    return { canceled: false, results: await sftpManager.uploadBatch(ownerId, connectionId, remoteDirectory, selection.filePaths, uploadProgress(sender)) }
   })
   ipcMain.handle('sftp:download', async (event, connectionId, remotePath) => {
     const ownerId = assertMainFrame(event)

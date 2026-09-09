@@ -154,7 +154,12 @@ input::placeholder { color: #8594a8; }
 .sftp-footer { display: flex; justify-content: space-between; gap: 16px; padding: 15px 24px; color: var(--muted); font-size: 11px; }
 .sftp-footer [data-role="operation"] { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #sftp-count { flex-shrink: 0; }
-.sftp-panel.drop-target { outline: 2px dashed var(--accent); outline-offset: -8px; background: #193129; }
+.remote-pane.drop-target::after, .remote-pane.drop-rejected::after { content: attr(data-drop-message); position: absolute; inset: 8px; z-index: 5; display: grid; place-content: center; padding: 28px; border: 2px dashed var(--accent); border-radius: 12px; color: #d2ffef; background: #153d32e8; backdrop-filter: blur(2px); text-align: center; white-space: pre-line; overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; pointer-events: none; animation: file-drop-enter .16s ease-out; }
+.remote-pane.drop-rejected::after { color: #ffced4; border-color: #d08f9b; background: #40282ee8; }
+.session-tab.drop-rejected { border-color: #d08f9b; background: #40282e; }
+@keyframes file-drop-enter { from { opacity: 0; scale: .98; } to { opacity: 1; scale: 1; } }
+.file-drag-preview { position: fixed; z-index: 2000; pointer-events: none; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 12px 18px; border: 1px solid #8edbc4; border-radius: 10px; color: #dcfff1; background: #243e36; box-shadow: 0 8px 22px #0005; font-size: 12px; }
+.file-dragging { opacity: .45; }
 .session-tab.drop-target { border: 2px dashed var(--accent); background: #335e50; }
 .sftp-table tr[draggable="true"] { cursor: grab; }
 select { width: 100%; padding: 10px; color: var(--text); background: #131b26; border: 1px solid #3c495b; border-radius: 8px; }
@@ -265,6 +270,10 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .transfer-results { flex-shrink: 0; max-height: 130px; overflow: auto; border-top: 1px solid var(--border); padding: 10px 16px; font-size: 11px; line-height: 1.8; background: #18222b; }
 .transfer-ok { color: #a5dfc9; }
 .transfer-error { color: #f4a3b0; }
+.transfer-canceled, .sftp-transfer.canceled .transfer-label { color: #d5bc86; }
+.transfer-heading { display: flex; align-items: center; gap: 12px; justify-content: space-between; margin-bottom: 8px; }
+.transfer-heading .transfer-label { min-width: 0; margin-bottom: 0; }
+.transfer-heading button { flex-shrink: 0; font-size: 11px; }
 .app-shell.sidebar-hidden { grid-template-columns: 0 minmax(0, 1fr); }
 .sidebar-hidden .sidebar { visibility: hidden; opacity: 0; pointer-events: none; transform: translateX(-12px); overflow: hidden; transition: opacity .16s ease, transform .24s cubic-bezier(.22,1,.36,1), visibility 0s .24s; }
 .sidebar-hidden .topbar { padding-left: 88px; }

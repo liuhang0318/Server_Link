@@ -17,13 +17,27 @@ const bridge = `
     for (let index = 1; index <= 12; index++) profiles.push({ ...profile, id: 'layout-' + index, name: '视觉验收服务器集群-' + index, host: 'layout' + index + '.example.com' });
   }
   const folders = [];
+  const uploads = new Map();
   // 静态假进度仅用于 UI 检查，不读取本机文件或访问服务器。
-  async function mockUpload(connectionId, name, fileIndex = 1, fileCount = 1) {
-    for (let step = 0; step <= 20; step++) {
-      progressListener({ connectionId, transferId: name, name, fileIndex, fileCount, total: 10485760, transferred: step * 524288, bytesPerSecond: 524288, phase: step === 20 ? 'completed' : 'uploading' });
-      await new Promise(resolve => setTimeout(resolve, 500));
+  async function mockBatch(connectionId, names) {
+    const operation = { canceled: false };
+    uploads.set(connectionId, operation);
+    const results = [];
+    let transferred = 0;
+    const total = names.length * 10485760;
+    const report = (name, fileIndex, phase) => progressListener({ connectionId, transferId: 'mock-batch', name, fileIndex, fileCount: names.length, total, transferred, bytesPerSecond: 524288, phase });
+    report(names[0], 0, 'preparing');
+    for (const [index, name] of names.entries()) {
+      for (let step = 0; step <= 20 && !operation.canceled; step++) {
+        transferred = index * 10485760 + step * 524288;
+        report(name, index + 1, 'uploading');
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      results.push(operation.canceled ? { name, success: false, canceled: true, error: '上传已取消' } : { name, success: true });
     }
-    return { name, success: true };
+    report(names.at(-1), names.length, operation.canceled ? 'canceled' : 'completed');
+    uploads.delete(connectionId);
+    return results;
   }
   window.serverLink = {
     // 网页预览没有原生菜单，只模拟单向 app 事件；实际 ⌘W/⌘Q 另用 Electron 验收。
@@ -37,7 +51,7 @@ const bridge = `
       ] }),
       upload: async (ids, targets) => {
         const results = [];
-        for (const target of targets) for (const [index, id] of ids.entries()) results.push({ connectionId: target.connectionId, ...await mockUpload(target.connectionId, id, index + 1, ids.length) });
+        for (const target of targets) results.push(...(await mockBatch(target.connectionId, ids.map(id => id === 'local-folder' ? 'Documents' : id))).map(result => ({ ...result, connectionId: target.connectionId })));
         return results;
       }
     },
@@ -68,6 +82,7 @@ const bridge = `
     },
     sftp: {
       onProgress: callback => { progressListener = callback; },
+      cancelUpload: async id => { const operation = uploads.get(id); if (operation) operation.canceled = true; return Boolean(operation); },
       cancelConnect: async () => {},
       // 仅模拟连接延迟，不读取路径、不校验或保存输入，也不发出网络请求。
       connect: async (profileId, secret) => {
@@ -87,11 +102,9 @@ const bridge = `
         if (remotePath === '/missing') throw new Error('目录不存在，请检查路径');
         return { path: remotePath, entries: folders };
       },
-      upload: async id => mockUpload(id, 'preview-upload.tar.gz'),
+      upload: async id => ({ canceled: false, results: await mockBatch(id, ['example-folder/nested/sample.txt']) }),
       uploadFiles: async (id, _path, files) => {
-        const results = [];
-        for (const [index, file] of files.entries()) results.push(await mockUpload(id, file.name, index + 1, files.length));
-        return results;
+        return mockBatch(id, files.map(file => file.name));
       },
       copyBetween: async (_sourceId, sourcePath, _destinationId, _directory) => {
         folders.push({ name: sourcePath.split('/').pop(), type: 'file', size: 1280440, modifiedAt: '2026-09-08T02:31:00.000Z' });

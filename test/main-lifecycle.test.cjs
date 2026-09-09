@@ -115,11 +115,17 @@ async function createMainHarness () {
     closeOwner () {}
     closeAll () {}
     assertOwned () {}
-    async upload (ownerId, connectionId, remotePath, file, onProgress) {
-      calls.uploads.push({ ownerId, connectionId, remotePath, file })
-      onProgress({ connectionId, name: path.basename(file), transferred: 0, total: 10, phase: 'uploading' })
-      if (connectionId === 'failure') throw new Error('server unavailable')
-      return { name: path.basename(file) }
+    async uploadBatch (ownerId, connectionId, remotePath, files, onProgress) {
+      return files.map((file, index) => {
+        calls.uploads.push({ ownerId, connectionId, remotePath, file })
+        onProgress({ connectionId, name: path.basename(file), transferred: 0, total: 10, phase: 'uploading', fileIndex: index + 1, fileCount: files.length })
+        return { name: path.basename(file), success: connectionId !== 'failure', error: connectionId === 'failure' ? 'server unavailable' : undefined }
+      })
+    }
+
+    cancelUpload (ownerId, connectionId) {
+      calls.canceledUpload = { ownerId, connectionId }
+      return true
     }
   }
 
@@ -373,4 +379,14 @@ test('local upload fans out to selected servers and reports each file independen
   assert.ok(harness.calls.progress.every(item => item.payload.fileCount === 2))
   await assert.rejects(invoke({ sender, senderFrame: {} }, ['one'], targets), /untrusted/u)
   assert.equal(harness.calls.uploads.length, 4)
+})
+
+test('upload cancellation requires the trusted frame and stays scoped to its owner', async () => {
+  const harness = await createMainHarness()
+  const sender = harness.windows[0].webContents
+  const cancel = harness.ipcHandlers.get('sftp:cancel-upload')
+  assert.throws(() => cancel({ sender, senderFrame: {} }, 'fixture-upload'), /untrusted/u)
+  assert.equal(harness.calls.canceledUpload, undefined)
+  assert.equal(cancel({ sender, senderFrame: sender.mainFrame }, 'fixture-upload'), true)
+  assert.deepEqual(harness.calls.canceledUpload, { ownerId: sender.id, connectionId: 'fixture-upload' })
 })

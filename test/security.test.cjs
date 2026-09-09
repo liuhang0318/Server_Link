@@ -71,7 +71,7 @@ test('preload exposes only a validated dropped-File path capability', () => {
   assert.deepEqual(Object.keys(exposedApi.app), ['onAction'])
   assert.deepEqual(Object.keys(exposedApi.privateKeys), ['getPathForFile'])
   assert.deepEqual(Object.keys(exposedApi.sftp).sort(), [
-    'cancelConnect', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onProgress', 'remove', 'upload', 'uploadFiles'
+    'cancelConnect', 'cancelUpload', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onProgress', 'remove', 'upload', 'uploadFiles'
   ])
   assert.equal(
     exposedApi.privateKeys.getPathForFile({ name: 'id_ed25519', size: 411, localPath: '/Users/test/.ssh/id_ed25519' }),
@@ -92,6 +92,10 @@ test('preload exposes only a validated dropped-File path capability', () => {
   exposedApi.sftp.uploadFiles('connection', '/upload', [{ name: 'real.txt', size: 4, localPath: '/tmp/real.txt' }])
   assert.equal(invocations.at(-1)[0], 'sftp:upload-files')
   assert.equal(invocations.at(-1)[3][0], '/tmp/real.txt')
+  exposedApi.sftp.uploadFiles('connection', '/upload', [{ name: 'folder', size: 0, localPath: '/tmp/fixture-folder' }])
+  assert.equal(invocations.at(-1)[3][0], '/tmp/fixture-folder')
+  exposedApi.sftp.cancelUpload('connection')
+  assert.equal(invocations.at(-1)[0], 'sftp:cancel-upload')
   let forwarded
   let progressListener
   ipcRenderer.on = (channel, listener) => { assert.equal(channel, 'sftp:progress'); progressListener = listener }

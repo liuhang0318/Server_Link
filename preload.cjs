@@ -115,9 +115,11 @@ const api = Object.freeze({
       return () => ipcRenderer.removeListener('sftp:progress', wrapped)
     },
     cancelConnect: profileId => ipcRenderer.invoke('sftp:cancel-connect', requireString(profileId, 'profileId')),
+    /** 仅允许终止本窗口所属连接的当前上传批次，不暴露文件删除或进程控制能力。 */
+    cancelUpload: connectionId => ipcRenderer.invoke('sftp:cancel-upload', requireString(connectionId, 'connectionId')),
     /** 只从真实拖入的 File 解析路径，不向渲染层提供任意本地路径上传接口。 */
     uploadFiles: (connectionId, remoteDirectory, files) => {
-      if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new TypeError('请一次拖入 1～100 个文件')
+      if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new TypeError('请一次拖入 1～100 个文件或文件夹')
       const paths = files.map(getPathForDroppedPrivateKey)
       return ipcRenderer.invoke('sftp:upload-files', requireString(connectionId, 'connectionId'), requireString(remoteDirectory, 'remoteDirectory'), paths)
     },
