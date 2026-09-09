@@ -10,6 +10,7 @@ const bridge = `
   let listener;
   let progressListener;
   let sessionCount = 0;
+  const sessionPrompts = new Map();
   const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
   const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
   // ?many 只扩充静态假配置，用来复现多标签/长名称溢出，不读取用户主机信息。
@@ -71,18 +72,29 @@ const bridge = `
       onEvent: callback => { listener = callback; },
       start: async profileId => {
         const sessionId = 'preview-' + (++sessionCount);
+        const prompt = '[' + (profiles.find(item => item.id === profileId)?.username || 'developer') + '@preview ~]$ ';
+        sessionPrompts.set(sessionId, prompt);
         setTimeout(() => listener({ type: 'progress', sessionId, phase: 'verifying', logs: 'Connection established.\\nChecking server host key.' }), 100);
         setTimeout(() => listener({ type: 'progress', sessionId, phase: 'connected', logs: 'Authenticated to loopback using publickey.' }), 4000);
-        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\n[' + (profiles.find(item => item.id === profileId)?.username || 'developer') + '@preview ~]$ ' }), 4100);
+        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\n' + prompt }), 4100);
         return { sessionId };
       },
-      // ?slow-echo 模拟网络回显延迟，区分即时本地草稿和稍后返回的终端输出。
+      // ?slow-echo 模拟网络延迟，验证原位预显到真实回显的交接；回车只生成空提示符，绝不执行命令。
       write: async (sessionId, data) => {
-        setTimeout(() => listener({ type: 'data', sessionId, data: data === '\\x7f' ? '\\b \\b' : data }), new URLSearchParams(location.search).has('slow-echo') ? 1200 : 0);
+        const prompt = sessionPrompts.get(sessionId);
+        if (!prompt) return false;
+        const echo = data.replace(/\\x7f/g, '\\b \\b').replace(/\\r\\n|\\r|\\n/g, '\\r\\n' + prompt);
+        setTimeout(() => {
+          if (sessionPrompts.has(sessionId)) listener({ type: 'data', sessionId, data: echo });
+        }, new URLSearchParams(location.search).has('slow-echo') ? 1200 : 0);
         return true;
       },
       resize: async () => {},
-      close: async sessionId => listener({ type: 'exit', sessionId, exitCode: 0 })
+      close: async sessionId => {
+        // 已关闭连接不再发出延迟回显，避免验收时旧会话事件污染新标签。
+        sessionPrompts.delete(sessionId);
+        listener({ type: 'exit', sessionId, exitCode: 0 });
+      }
     },
     sftp: {
       onProgress: callback => { progressListener = callback; },

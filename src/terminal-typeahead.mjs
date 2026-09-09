@@ -14,6 +14,9 @@ export class TerminalTypeahead {
     this.disposed = false
     this.epoch = 0
     this.writesPending = 0
+    this.renderPending = false
+    this.submitted = false
+    this.retiring = false
     this.pending = []
     this.echoPrefix = ''
     this.command = ''
@@ -24,6 +27,8 @@ export class TerminalTypeahead {
     const user = typeof username === 'string' && /^[a-zA-Z0-9_.-]{1,64}$/.test(username) ? username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null
     const host = '[a-zA-Z0-9][a-zA-Z0-9._-]*'
     this.prompt = user ? new RegExp(`^(?:\\[${user}@${host} [^\\]\\r\\n]{1,160}\\][#$] |${user}@${host}:[^\\r\\n]{1,160}[#$] |${user}@${host} [^\\r\\n]{1,160} % )$`) : null
+    // write 回调仅代表解析完成；真实行绘制后才撤下预显，避免暴露尚未更新的末尾字符。
+    this.renderDisposable = terminal.onRender(range => this.afterRender(range))
   }
 
   /** 只绘制预测；调用方仍须立即将原始 data 发送一次，不等待任何回显。 */
@@ -31,6 +36,13 @@ export class TerminalTypeahead {
     if (this.disposed || !this.enabled) return
     const firstInput = !this.inputSeen
     this.inputSeen = true
+    // 回车立刻封存命令，不预显后续可能的密码；已显示的尾字仍等真实回显接管。
+    if (this.submitted || this.retiring) return
+    if (data === '\r' && this.anchor) {
+      this.submitted = true
+      this.needsNewLine = true
+      return
+    }
     if (typeof data !== 'string' || !data || [...data].some(character => {
       const code = character.charCodeAt(0)
       return code !== 8 && code !== 127 && (code < 32 || code > 126)
@@ -58,26 +70,47 @@ export class TerminalTypeahead {
     this.render()
   }
 
-  /** 原始远端字节一律交给 xterm；回调后再更新遮罩，防止异步解析造成双重字符。 */
+  /** 原始远端字节一律交给 xterm；解析只标记待交接，不提前撤下尚未绘制的预显。 */
   output (data) {
     if (this.disposed) return
-    if (this.anchor && !this.consumeEcho(data)) this.reset()
+    if (this.anchor && !this.retiring && !this.consumeEcho(data)) {
+      // 尾字与换行/命令输出可合在一包；先停止预测，保留画面直到该包真正绘制。
+      this.retiring = true
+      this.needsNewLine = true
+    }
     if (typeof data === 'string' && data.includes('\n')) this.needsNewLine = false
     const epoch = this.epoch
     this.writesPending++
     this.terminal.write(data, () => {
       this.writesPending--
       if (this.disposed || epoch !== this.epoch) return
-      if (this.anchor && !this.validPosition()) this.reset()
-      if (!this.anchor && this.writesPending === 0) this.recognizePrompt()
-      this.render()
+      this.renderPending = true
     })
+  }
+
+  /** 只在原命令行已绘制且回显解析队列排空后交接；无关行刷新不能提前隐藏尾字。 */
+  afterRender ({ start, end }) {
+    if (this.disposed || !this.renderPending || this.writesPending) return
+    const row = this.anchor?.y ?? this.terminal.buffer.active.cursorY
+    if (row < start || row > end) return
+    this.renderPending = false
+    if (this.anchor && (this.retiring || !this.validPosition())) {
+      const needsNewLine = this.needsNewLine
+      this.reset()
+      // 本轮真实输出已有换行时允许识别新提示符；单纯尾字确认不能解封已提交的命令。
+      this.needsNewLine = needsNewLine
+    }
+    if (!this.anchor) this.recognizePrompt()
+    this.render()
   }
 
   /** 撤销预测并等待新一行提示符；旧 write 回调不得重新信任被取消的命令。 */
   reset () {
     this.epoch++
     this.needsNewLine = true
+    this.renderPending = false
+    this.submitted = false
+    this.retiring = false
     this.anchor = null
     this.pending = []
     this.echoPrefix = ''
@@ -104,6 +137,7 @@ export class TerminalTypeahead {
   dispose () {
     this.reset()
     this.disposed = true
+    this.renderDisposable.dispose()
     this.overlay?.remove()
     this.overlay = null
   }
@@ -120,7 +154,7 @@ export class TerminalTypeahead {
 
   /** 从已解析的终端单元格识别提示符，ANSI 颜色不参与匹配，未知提示符默认禁用。 */
   recognizePrompt () {
-    if (!this.enabled || !this.prompt || this.needsNewLine || this.pending.length) return
+    if (!this.enabled || !this.prompt || this.needsNewLine || this.submitted || this.retiring || this.pending.length) return
     const buffer = this.terminal.buffer.active
     if (buffer.type !== 'normal' || buffer.viewportY !== buffer.baseY || buffer.cursorX >= this.terminal.cols - 2) return
     const line = buffer.getLine(buffer.baseY + buffer.cursorY)
@@ -154,7 +188,7 @@ export class TerminalTypeahead {
 
   /** 预测层不接管焦点、不写入 xterm 历史；覆盖命令尾同时遮住旧光标和退格残字。 */
   render () {
-    if (!this.anchor || (!this.pending.length && !this.echoPrefix && !this.writesPending)) {
+    if (!this.anchor || (!this.pending.length && !this.echoPrefix && !this.writesPending && !this.renderPending)) {
       if (this.overlay) this.overlay.hidden = true
       return
     }

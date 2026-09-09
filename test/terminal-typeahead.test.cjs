@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 
-/** 最小异步 xterm/DOM 桩；write 必须经 flush 才改变真实屏幕，覆盖解析尚未完成的竞争。 */
+/** 分开模拟 xterm 的解析回调和行绘制，防止把 buffer 更新误当成用户已看到真实回显。 */
 async function harness (username = 'root') {
   const { TerminalTypeahead } = await import('../src/terminal-typeahead.mjs')
   class Node {
@@ -28,12 +28,15 @@ async function harness (username = 'root') {
   }
   const writes = []
   const callbacks = []
+  const renderListeners = new Set()
+  const paintedLines = []
   const terminal = {
     buffer: { active: buffer },
     cols: 120,
     rows: 24,
     options: { fontFamily: 'monospace', fontSize: 14, theme: { background: '#11161e' } },
-    write: (data, callback) => { writes.push(data); callbacks.push({ data, callback }) }
+    write: (data, callback) => { writes.push(data); callbacks.push({ data, callback }) },
+    onRender: listener => { renderListeners.add(listener); return { dispose: () => renderListeners.delete(listener) } }
   }
   let escape = ''
   function parse (data) {
@@ -57,11 +60,18 @@ async function harness (username = 'root') {
     }
   }
   const prediction = new TerminalTypeahead(terminal, mount, { username })
-  function flush () { while (callbacks.length) { const { data, callback } = callbacks.shift(); parse(data); callback() } }
+  function parsePending (count = callbacks.length) {
+    while (callbacks.length && count-- > 0) { const { data, callback } = callbacks.shift(); parse(data); callback() }
+  }
+  function paint (start = 0, end = terminal.rows - 1) {
+    for (let row = start; row <= end; row++) paintedLines[row] = lines[row] || ''
+    for (const listener of renderListeners) listener({ start, end })
+  }
+  function flush () { parsePending(); paint() }
   function output (data) { prediction.output(data); flush() }
   function visible () { return screen.children.find(node => !node.hidden && !node.removed) }
   output('[root@demo ~]# ')
-  return { prediction, terminal, buffer, screen, writes, flush, output, visible, lines }
+  return { prediction, terminal, buffer, screen, writes, flush, parsePending, paint, output, visible, lines, paintedLines, renderListeners }
 }
 
 test('inline typing is immediate and never writes fabricated bytes or takes focus', async () => {
@@ -192,6 +202,134 @@ test('Enter/reset while xterm parses cannot resurrect a stale trusted prompt', a
   h.output('\r\nPassword: ')
   h.prediction.input('secret')
   assert.equal(h.visible(), undefined)
+})
+
+test('Enter keeps the last unacknowledged letter visible through parsing until its row is painted', async () => {
+  for (const queuedBeforeEnter of [false, true]) {
+    const h = await harness()
+    h.prediction.input('echo ab')
+    h.output('echo ab')
+    h.prediction.input('c')
+    if (queuedBeforeEnter) h.prediction.output('c')
+    h.prediction.input('\r')
+    // 回车后的输入仍由原链路发送，但不能混入已提交命令或预显潜在口令。
+    h.prediction.input('secret')
+    assert.equal(h.visible().children[0].textContent, 'echo abc')
+    if (!queuedBeforeEnter) h.prediction.output('c')
+    h.prediction.input('secret')
+    h.parsePending()
+    assert.equal(h.lines[0], '[root@demo ~]# echo abc')
+    assert.equal(h.paintedLines[0], '[root@demo ~]# echo ab')
+    assert.equal(h.visible().children[0].textContent, 'echo abc')
+    h.paint(1, 1)
+    assert.equal(h.visible().children[0].textContent, 'echo abc')
+    h.paint(0, 0)
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.paintedLines[0], '[root@demo ~]# echo abc')
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined)
+    assert.deepEqual(h.writes, ['[root@demo ~]# ', 'echo ab', 'c'])
+    h.output('\r\n[root@demo ~]# ')
+    h.prediction.input('ls')
+    assert.equal(h.visible().children[0].textContent, 'ls')
+  }
+})
+
+test('Enter tolerates split and combined final echoes without blank frames or duplicated terminal bytes', async () => {
+  for (const chunks of [['abc\r\nPassword: '], ['a', 'bc', '\r', '\nPassword: '], ['a', 'bc\r\nPassword: ']]) {
+    const h = await harness()
+    h.prediction.input('abc')
+    h.prediction.input('\r')
+    for (const chunk of chunks) {
+      h.prediction.output(chunk)
+      h.prediction.input('secret')
+      if (!h.paintedLines[0].endsWith('abc')) assert.equal(h.visible().children[0].textContent, 'abc')
+      h.parsePending()
+      if (!h.paintedLines[0].endsWith('abc')) assert.equal(h.visible().children[0].textContent, 'abc')
+      h.paint()
+    }
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.lines[0], '[root@demo ~]# abc')
+    assert.equal(h.lines[1], 'Password: ')
+    assert.deepEqual(h.writes, ['[root@demo ~]# ', ...chunks])
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined)
+  }
+})
+
+test('Enter after backspace keeps the corrected command until fragmented deletion is drawn', async () => {
+  for (const erased of ['\b \b', '\b\x1b[K', '\x1b[D\x1b[K']) {
+    const h = await harness()
+    h.prediction.input('abc')
+    h.output('abc')
+    h.prediction.input('\x7f')
+    h.prediction.input('\r')
+    for (const byte of erased) {
+      h.prediction.output(byte)
+      h.parsePending()
+      assert.equal(h.visible().children[0].textContent, 'ab')
+      h.paint()
+    }
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.paintedLines[0].trimEnd(), '[root@demo ~]# ab')
+    h.output('\r\n[root@demo ~]# ')
+    h.prediction.input('z')
+    assert.equal(h.visible().children[0].textContent, 'z')
+  }
+})
+
+test('new keystrokes between parse and paint do not expose the old rendered tail', async () => {
+  const h = await harness()
+  h.prediction.input('a')
+  h.prediction.output('a')
+  h.parsePending()
+  h.prediction.input('b')
+  h.paint()
+  assert.equal(h.visible().children[0].textContent, 'ab')
+  h.prediction.output('b')
+  h.parsePending()
+  h.prediction.input('\r')
+  assert.equal(h.visible().children[0].textContent, 'ab')
+  h.paint()
+  assert.equal(h.visible(), undefined)
+  assert.equal(h.paintedLines[0], '[root@demo ~]# ab')
+})
+
+test('an early rendered batch cannot retire a command while later echo chunks remain queued', async () => {
+  const h = await harness()
+  h.prediction.input('abc')
+  h.prediction.input('\r')
+  h.prediction.output('a')
+  h.prediction.output('bc\r\n[root@demo ~]# ')
+  h.parsePending(1)
+  h.paint()
+  assert.equal(h.paintedLines[0], '[root@demo ~]# a')
+  assert.equal(h.visible().children[0].textContent, 'abc')
+  h.parsePending()
+  assert.equal(h.visible().children[0].textContent, 'abc')
+  h.paint()
+  assert.equal(h.visible(), undefined)
+  assert.equal(h.paintedLines[0], '[root@demo ~]# abc')
+  h.prediction.input('ls')
+  assert.equal(h.visible().children[0].textContent, 'ls')
+})
+
+test('reset, disable and disposal during handoff invalidate late parse and render callbacks', async () => {
+  for (const parseFirst of [false, true]) {
+    for (const cancel of [h => h.prediction.reset(), h => h.prediction.setEnabled(false), h => h.prediction.dispose()]) {
+      const h = await harness()
+      h.prediction.input('a')
+      h.prediction.input('\r')
+      h.prediction.output('a\r\n[root@demo ~]# ')
+      if (parseFirst) h.parsePending()
+      cancel(h)
+      h.flush()
+      h.prediction.input('secret')
+      assert.equal(h.visible(), undefined)
+      assert.equal(h.paintedLines[0], '[root@demo ~]# a')
+      if (h.prediction.disposed) assert.equal(h.renderListeners.size, 0)
+    }
+  }
 })
 
 test('explicit disable and disposal cancel prediction without suppressing real output', async () => {

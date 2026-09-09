@@ -76,22 +76,25 @@ class SessionManager {
 
   start (ownerId, profile, emit) {
     const sessionId = randomUUID()
+    const prompt = `[${profile.username}@preview ~]$ `
     const timer = setTimeout(() => {
       if (!this.sessions.has(sessionId)) return
       emit({ type: 'progress', sessionId, phase: 'connected', logs: 'Static fixture: no network connection.' })
-      emit({ type: 'data', sessionId, data: `\x1b[32m${profile.name} · 隔离演示，无远程连接\x1b[0m\r\n[${profile.username}@preview ~]$ ` })
+      emit({ type: 'data', sessionId, data: `\x1b[32m${profile.name} · 隔离演示，无远程连接\x1b[0m\r\n${prompt}` })
     }, 700)
-    this.sessions.set(sessionId, { ownerId, emit, timer })
+    this.sessions.set(sessionId, { ownerId, emit, timer, prompt })
     emit({ type: 'progress', sessionId, phase: 'connecting', logs: 'Preparing static fixture.' })
     return { sessionId, status: 'running' }
   }
 
+  /** 回车只返回当前配置的空提示符，模拟提交边界而不执行输入的命令。 */
   write (ownerId, sessionId, data) {
     const record = this.sessions.get(sessionId)
     if (record?.ownerId !== ownerId) return
-    // --slow-echo 用于真实 Electron 窗口的输入预显验收，不访问任何远端服务器。
+    const echo = data.replace(/\x7f/g, '\b \b').replace(/\r\n|\r|\n/g, '\r\n' + record.prompt)
+    // --slow-echo 用于真实 Electron 窗口的原位预显交接验收，不访问任何远端服务器。
     setTimeout(() => {
-      if (this.sessions.get(sessionId) === record) record.emit({ type: 'data', sessionId, data: data === '\x7f' ? '\b \b' : data })
+      if (this.sessions.get(sessionId) === record) record.emit({ type: 'data', sessionId, data: echo })
     }, process.argv.includes('--slow-echo') ? 1200 : 0)
   }
 
