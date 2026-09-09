@@ -13,3 +13,12 @@ test('SSH and SFTP tabs can move in both directions without changing their ident
   assert.deepEqual(moveTab(order, 'ssh:a', 'ssh:a'), order)
   assert.deepEqual(order, ['ssh:a', 'sftp:b', 'ssh:c', 'sftp:d'])
 })
+
+test('tab navigation respects overflow, fractional boundaries and resized widths', async () => {
+  const { tabScrollState } = await import('../src/tab-order.mjs')
+  assert.deepEqual(tabScrollState(0, 600, 300), { canScrollLeft: false, canScrollRight: false })
+  assert.deepEqual(tabScrollState(0, 300, 1000), { canScrollLeft: false, canScrollRight: true })
+  assert.deepEqual(tabScrollState(250, 300, 1000), { canScrollLeft: true, canScrollRight: true })
+  assert.deepEqual(tabScrollState(699.5, 300, 1000), { canScrollLeft: true, canScrollRight: false })
+  assert.deepEqual(tabScrollState(0, 1000, 1000), { canScrollLeft: false, canScrollRight: false })
+})

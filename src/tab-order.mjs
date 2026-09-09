@@ -5,3 +5,9 @@ export function moveTab (order, source, target, after = false) {
   result.splice(result.indexOf(target) + Number(after), 0, source)
   return result
 }
+
+/** 忽略亚像素误差，内容未溢出或已到边界时禁用对应方向，不改变当前选中项。 */
+export function tabScrollState (scrollLeft, clientWidth, scrollWidth) {
+  const maximum = Math.max(0, scrollWidth - clientWidth)
+  return { canScrollLeft: scrollLeft > 1, canScrollRight: scrollLeft < maximum - 1 }
+}

@@ -154,7 +154,7 @@ test('failed replacement creation keeps the original terminal and tab order', as
 /** 最小 DOM 桩模拟 replaceChildren 丢失焦点，验证真实重绘只恢复标签原有焦点。 */
 function tabsHarness (focusedKey) {
   const focusCalls = []
-  const document = { activeElement: {} }
+  const document = { activeElement: {}, querySelector: () => ({ disabled: false }) }
   class Node {
     constructor () {
       this.dataset = {}
@@ -207,7 +207,8 @@ function tabsHarness (focusedKey) {
     tabPointer: null,
     createButton: () => new Node(),
     openFileWorkspace () {},
-    bindSftpDropTarget () {}
+    bindSftpDropTarget () {},
+    tabScrollState: () => ({ canScrollLeft: false, canScrollRight: false })
   })
   vm.runInContext(source.slice(source.indexOf('function renderTabs ('), source.indexOf('/** 根据指针位置预览')), context)
   return { context, state, tabs, document, externalFocus, focusCalls }

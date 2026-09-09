@@ -12,6 +12,10 @@ const bridge = `
   let sessionCount = 0;
   const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
   const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
+  // ?many 只扩充静态假配置，用来复现多标签/长名称溢出，不读取用户主机信息。
+  if (new URLSearchParams(location.search).has('many')) {
+    for (let index = 1; index <= 12; index++) profiles.push({ ...profile, id: 'layout-' + index, name: '视觉验收服务器集群-' + index, host: 'layout' + index + '.example.com' });
+  }
   const folders = [];
   // 静态假进度仅用于 UI 检查，不读取本机文件或访问服务器。
   async function mockUpload(connectionId, name, fileIndex = 1, fileCount = 1) {

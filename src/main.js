@@ -3,7 +3,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { version } from '../package.json'
 import '@xterm/xterm/css/xterm.css'
 import './style.css'
-import { moveTab } from './tab-order.mjs'
+import { moveTab, tabScrollState } from './tab-order.mjs'
 import { groupProfiles } from './profile-groups.mjs'
 import { connectBatch } from './connection-batch.mjs'
 import { filterFiles, refreshedSelection, selectFileRange } from './file-browser.mjs'
@@ -1468,6 +1468,14 @@ function renderTabs () {
   elements.tabs.scrollLeft = scrollLeft
   // 只恢复原本位于标签栏的焦点，后台状态刷新不能抢终端输入或改变横向位置。
   if (focusedKey) nodes.get(focusedKey)?.focus({ preventScroll: true })
+  syncTabScrollControls()
+}
+
+/** 标签数量/宽度/滚动变化只刷新导航按钮，后台进度不自动滚动或切换用户视图。 */
+function syncTabScrollControls () {
+  const { canScrollLeft, canScrollRight } = tabScrollState(elements.tabs.scrollLeft, elements.tabs.clientWidth, elements.tabs.scrollWidth)
+  document.querySelector('#tabs-scroll-left').disabled = !canScrollLeft
+  document.querySelector('#tabs-scroll-right').disabled = !canScrollRight
 }
 
 /** 根据指针位置预览插入顺序，靠近标签栏两端时滚动以到达隐藏标签。 */
@@ -1564,7 +1572,7 @@ function syncWorkspaceState () {
 
   if (state.sftpActive && state.sftp) {
     elements.sessionStatus.textContent = state.sftp.status === 'ready' ? 'SFTP 已连接' : state.sftp.status === 'failed' ? 'SFTP 连接失败' : 'SFTP 连接中'
-    elements.sessionStatus.className = 'status-pill running'
+    elements.sessionStatus.className = `status-pill ${state.sftp.status === 'ready' ? 'running' : state.sftp.status === 'failed' ? 'exited' : ''}`
     return
   }
   if (!session) {
@@ -1692,6 +1700,16 @@ const resizeObserver = new window.ResizeObserver(() => {
   api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
 })
 resizeObserver.observe(elements.terminalStack)
+
+// 只观察标签可视区，侧栏伸缩和窗口缩放也会正确更新两端按钮状态。
+const tabResizeObserver = new window.ResizeObserver(syncTabScrollControls)
+tabResizeObserver.observe(elements.tabs)
+elements.tabs.addEventListener('scroll', syncTabScrollControls, { passive: true })
+for (const [id, direction] of [['tabs-scroll-left', -1], ['tabs-scroll-right', 1]]) {
+  document.querySelector(`#${id}`).addEventListener('click', () => {
+    elements.tabs.scrollBy({ left: direction * Math.max(160, elements.tabs.clientWidth * 0.8), behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+  })
+}
 
 elements.addProfile.addEventListener('click', () => openProfileDialog())
 elements.emptyAddProfile.addEventListener('click', () => openProfileDialog())
