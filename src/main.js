@@ -99,6 +99,7 @@ let profileSaving = false
 let folderConnection = null
 let notificationTimer
 let presentedView = null
+let sidebarResizeTimer = null
 
 /** 非阻塞反馈保留终端输入焦点；错误需用户关闭，成功提示自动消失。 */
 function notify (message, isError = false) {
@@ -727,8 +728,7 @@ function createRemotePane (connection) {
     // 关闭其他文件栏不应先把它激活；否则关闭动作会间接改变当前标签。
     if (event.target.closest('[data-role="close"]')) return
     state.sftp = connection
-    state.activeSessionId = null
-    state.sftpActive = true
+    enterFileWorkspace()
     renderRemoteChoices()
     renderTabs()
     syncWorkspaceState()
@@ -873,7 +873,7 @@ function renderSftpFiles (connection = state.sftp) {
     }
     const nameCell = document.createElement('td')
     nameCell.append(createButton(
-      `${entry.type === 'directory' ? '▸' : entry.type === 'symlink' ? '↗' : '·'}  ${entry.name}`,
+      entry.name,
       `sftp-name ${entry.type}`,
       () => entry.type === 'directory' ? refreshSftp(remotePath, connection) : downloadSftpFile(remotePath, connection),
       entry.type === 'directory' ? `打开文件夹 ${entry.name}` : `下载 ${entry.name}`
@@ -1103,12 +1103,18 @@ async function removeSftpEntry (remotePath, connection = state.sftp) {
   }
 }
 
-/** 文件工作空间可在未连接远端时打开，先展示本机目录。 */
-function openFileWorkspace () {
+/** 只在进入文件工作区时让出侧栏空间；同一工作区内切栏、刷新尊重用户手动展开。 */
+function enterFileWorkspace () {
+  if (!state.sftpActive) setSidebarHidden(true)
   state.filesOpen = true
   state.sftpActive = true
-  state.sftp = null
   state.activeSessionId = null
+}
+
+/** 文件工作空间可在未连接远端时打开，先展示本机目录。 */
+function openFileWorkspace () {
+  enterFileWorkspace()
+  state.sftp = null
   renderTabs()
   syncWorkspaceState()
   renderRemoteChoices()
@@ -1193,7 +1199,7 @@ function renderLocalFiles () {
       row.addEventListener('dragend', () => { draggedLocalIds = null; clearFileDragFeedback() })
     }
     const name = document.createElement('td')
-    const button = createButton(`${entry.type === 'directory' ? '▸' : '·'} ${entry.name}`, 'sftp-name', () => {}, entry.name)
+    const button = createButton(entry.name, `sftp-name ${entry.type}`, () => {}, entry.name)
     button.title = `${entry.name} · ${entry.modifiedAt}`
     button.disabled = !['directory', 'file'].includes(entry.type)
     if (entry.type === 'file') {
@@ -1283,6 +1289,8 @@ async function connectSelectedServers (event) {
   document.querySelector('#servers-dialog').close()
   selectingServers = true
   try {
+    // 批量入口也先切入文件区再创建占位；后续握手完成不能再次收起手动展开的侧栏。
+    if (!state.sftpActive) openFileWorkspace()
     notify(`正在并发连接 ${ids.length} 台服务器，临时网络异常将自动重试…`)
     const connections = ids.map(prepareSftp).filter(Boolean)
     const results = await connectBatch(connections, connection => connectSftp(connection.profileId, { activate: false, quiet: true, connection }))
@@ -1345,9 +1353,7 @@ function activateSftp (connectionId = state.sftp?.connectionId, { scroll = true 
   if (!connection) return
   const changed = !state.sftpActive || state.sftp !== connection
   state.sftp = connection
-  state.filesOpen = true
-  state.sftpActive = true
-  state.activeSessionId = null
+  enterFileWorkspace()
   renderTabs()
   syncWorkspaceState()
   renderSftpFiles()
@@ -1508,6 +1514,20 @@ async function submitRemoteCopy (event) {
   }
 }
 
+/** 名称始终作为纯文本；协议标识独立缩排，不把长名称或重复的 SFTP 后缀挤进标签。 */
+function setTabContent (tab, title, kind) {
+  tab.dataset.kind = kind
+  const label = document.createElement('span')
+  label.className = 'tab-label'
+  label.textContent = title
+  const protocol = document.createElement('span')
+  protocol.className = 'tab-kind'
+  protocol.textContent = kind === 'ssh' ? 'SSH' : 'SFTP'
+  protocol.setAttribute('aria-hidden', 'true')
+  tab.setAttribute('aria-label', `${title} · ${protocol.textContent}`)
+  tab.replaceChildren(label, protocol)
+}
+
 /** 渲染期间保留统一顺序；拖动时延后状态重绘，避免销毁指针捕获节点。 */
 function renderTabs () {
   if (tabPointer) return
@@ -1520,7 +1540,9 @@ function renderTabs () {
   }
   elements.tabs.replaceChildren()
   if (state.filesOpen) {
-    const tab = createButton('本机文件 · SFTP', 'session-tab', openFileWorkspace)
+    const tab = createButton('本机文件 · SFTP', 'session-tab', openFileWorkspace, '本机文件 · SFTP')
+    setTabContent(tab, '本机文件', 'local')
+    tab.title = '本机文件 · SFTP 文件工作台'
     tab.dataset.tabKey = 'files:local'
     tab.setAttribute('role', 'tab')
     tab.setAttribute('aria-selected', String(state.sftpActive && !state.sftp))
@@ -1531,15 +1553,13 @@ function renderTabs () {
     const tab = createButton(session.title, 'session-tab', () => activateSession(session.id))
     tab.title = `${session.title} · SSH`
     tab.dataset.tabKey = `ssh:${session.id}`
-    const label = document.createElement('span')
-    label.className = 'tab-label'
-    label.textContent = session.title
-    tab.replaceChildren(label)
+    setTabContent(tab, session.title, 'ssh')
     tab.setAttribute('role', 'tab')
     tab.setAttribute('aria-selected', String(session.id === state.activeSessionId))
     tab.classList.toggle('active', session.id === state.activeSessionId)
     const dot = document.createElement('span')
-    dot.className = `tab-dot ${session.status}`
+    dot.className = `tab-dot ${session.status === 'running' && !session.connected ? 'connecting' : session.status}`
+    dot.setAttribute('aria-hidden', 'true')
     tab.prepend(dot)
     elements.tabs.append(tab)
   }
@@ -1547,10 +1567,8 @@ function renderTabs () {
     const tab = createButton(connection.title, 'session-tab sftp-tab', () => activateSftp(connection.connectionId))
     tab.title = `${connection.title} · ${connection.path} · 可拖入文件`
     tab.dataset.tabKey = `sftp:${connection.connectionId}`
-    const label = document.createElement('span')
-    label.className = 'tab-label'
-    label.textContent = `${connection.title}${connection.status === 'ready' ? '' : connection.status === 'failed' ? ' · 失败' : ' · 连接中'}`
-    tab.replaceChildren(label)
+    const label = `${connection.title.replace(/ · SFTP$/u, '')}${connection.status === 'ready' ? '' : connection.status === 'failed' ? ' · 失败' : ' · 连接中'}`
+    setTabContent(tab, label, 'sftp')
     tab.setAttribute('role', 'tab')
     const active = state.sftpActive && state.sftp === connection
     tab.setAttribute('aria-selected', String(active))
@@ -1558,6 +1576,7 @@ function renderTabs () {
     bindSftpDropTarget(tab, () => connection)
     const dot = document.createElement('span')
     dot.className = `tab-dot ${connection.status === 'ready' ? 'running' : connection.status === 'failed' ? 'exited' : 'connecting'}`
+    dot.setAttribute('aria-hidden', 'true')
     tab.prepend(dot)
     elements.tabs.append(tab)
   }
@@ -1669,7 +1688,8 @@ function syncWorkspaceState () {
   // 高频终端输出和握手事件只更新状态，不能反复触发内容入场、打断输入视觉。
   if (presentedView !== view) {
     presentedView = view
-    animateSurface(view, 'settle')
+    // 文件工作台轻移入场；SSH 仍仅淡入，不能给终端输入叠加位移或延迟。
+    animateSurface(view, state.sftpActive ? 'enter' : 'settle')
   }
   elements.reconnect.disabled = !session
   elements.close.disabled = !hasView
@@ -1817,13 +1837,47 @@ function handleAppAction (action) {
   closeActiveSession().catch(error => notify(errorMessage(error), true))
 }
 
-const resizeObserver = new window.ResizeObserver(() => {
+/** 侧栏过渡只在结束后同步 PTY 尺寸，避免每帧重排终端并频繁通知远端 shell。 */
+function fitActiveTerminal () {
+  if (sidebarResizeTimer !== null || state.sftpActive) return
   const session = state.sessions.get(state.activeSessionId)
   if (!session?.opened || session.terminalMount.classList.contains('hidden')) return
   session.fitAddon.fit()
   api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
-})
+}
+
+/** 读取当前会话而非收起时的会话，异步动画结束不能重新操作已关闭或隐藏的终端。 */
+function finishSidebarResize () {
+  if (sidebarResizeTimer === null) return
+  clearTimeout(sidebarResizeTimer)
+  sidebarResizeTimer = null
+  fitActiveTerminal()
+}
+
+/** 自动与手动收起共用可访问状态，隐藏区域不能继续接收键盘焦点。 */
+function setSidebarHidden (hidden) {
+  const app = document.querySelector('#app')
+  const sidebar = document.querySelector('.sidebar')
+  const button = document.querySelector('#sidebar-toggle')
+  const changed = app.classList.contains('sidebar-hidden') !== hidden
+  if (hidden && sidebar.contains(document.activeElement)) button.focus({ preventScroll: true })
+  sidebar.inert = hidden
+  sidebar.setAttribute('aria-hidden', String(hidden))
+  button.setAttribute('aria-expanded', String(!hidden))
+  button.setAttribute('aria-label', hidden ? '展开服务器侧栏' : '隐藏服务器侧栏')
+  button.title = hidden ? '展开服务器侧栏' : '隐藏服务器侧栏'
+  if (!changed) return
+  // 减少动态效果或快速反向切换可能没有 transitionend，兜底仍保证最终尺寸同步。
+  clearTimeout(sidebarResizeTimer)
+  sidebarResizeTimer = setTimeout(finishSidebarResize, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 320)
+  app.classList.toggle('sidebar-hidden', hidden)
+}
+
+const resizeObserver = new window.ResizeObserver(fitActiveTerminal)
 resizeObserver.observe(elements.terminalStack)
+document.querySelector('#app').addEventListener('transitionend', event => {
+  if (event.target === event.currentTarget && event.propertyName === 'grid-template-columns') finishSidebarResize()
+})
 
 // 只观察标签可视区，侧栏伸缩和窗口缩放也会正确更新两端按钮状态。
 const tabResizeObserver = new window.ResizeObserver(syncTabScrollControls)
@@ -1952,11 +2006,7 @@ profileSearch.addEventListener('search', renderProfiles)
 document.querySelector('#open-files').addEventListener('click', openFileWorkspace)
 addPaneResize(document.querySelector('.local-pane'))
 document.querySelector('#sidebar-toggle').addEventListener('click', () => {
-  const hidden = document.querySelector('#app').classList.toggle('sidebar-hidden')
-  const button = document.querySelector('#sidebar-toggle')
-  button.setAttribute('aria-expanded', String(!hidden))
-  button.setAttribute('aria-label', hidden ? '展开服务器侧栏' : '隐藏服务器侧栏')
-  button.title = hidden ? '展开服务器侧栏' : '隐藏服务器侧栏'
+  setSidebarHidden(!document.querySelector('#app').classList.contains('sidebar-hidden'))
 })
 for (const [id, direction] of [['files-scroll-left', -1], ['files-scroll-right', 1]]) {
   document.querySelector(`#${id}`).addEventListener('click', () => {
@@ -2002,7 +2052,7 @@ window.addEventListener('keydown', event => {
   if (!(event.metaKey || event.ctrlKey) || document.querySelector('dialog[open]')) return
   if (event.key.toLowerCase() === 'k') {
     event.preventDefault()
-    if (document.querySelector('#app').classList.contains('sidebar-hidden')) document.querySelector('#sidebar-toggle').click()
+    setSidebarHidden(false)
     profileSearch.focus()
     profileSearch.select()
   } else if (event.key.toLowerCase() === 'n') {

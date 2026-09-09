@@ -162,7 +162,7 @@ function tabsHarness (focusedKey) {
       this.classList = { toggle () {} }
     }
 
-    setAttribute () {}
+    setAttribute (key, value) { this[key] = value }
     contains (node) { return this.children.includes(node) }
     closest () { return this.dataset.tabKey ? this : null }
     replaceChildren (...children) {
@@ -210,7 +210,7 @@ function tabsHarness (focusedKey) {
     bindSftpDropTarget () {},
     tabScrollState: () => ({ canScrollLeft: false, canScrollRight: false })
   })
-  vm.runInContext(source.slice(source.indexOf('function renderTabs ('), source.indexOf('/** 根据指针位置预览')), context)
+  vm.runInContext(source.slice(source.indexOf('function setTabContent ('), source.indexOf('/** 根据指针位置预览')), context)
   return { context, state, tabs, document, externalFocus, focusCalls }
 }
 
@@ -228,4 +228,21 @@ test('background tab repaint never steals input focus from outside the tab bar',
   h.context.renderTabs()
   assert.equal(h.document.activeElement, h.externalFocus)
   assert.deepEqual(h.focusCalls, [])
+})
+
+test('tab protocol badges stay separate from literal names and SFTP suffixes do not repeat', () => {
+  const h = tabsHarness(null)
+  const name = '<img src=x> long server name'
+  h.state.sessions.get('a').title = name
+  h.state.sftpConnections.get('remote-r').title = 'Remote · SFTP'
+  h.context.renderTabs()
+  const ssh = h.tabs.children.find(tab => tab.dataset.tabKey === 'ssh:a')
+  const remote = h.tabs.children.find(tab => tab.dataset.tabKey === 'sftp:remote-r')
+  assert.equal(ssh.children.find(node => node.className === 'tab-label').textContent, name)
+  assert.equal(ssh.children.find(node => node.className === 'tab-kind').textContent, 'SSH')
+  assert.equal(remote.children.find(node => node.className === 'tab-label').textContent, 'Remote')
+  assert.equal(remote.children.find(node => node.className === 'tab-kind').textContent, 'SFTP')
+  assert.equal(remote.dataset.kind, 'sftp')
+  assert.equal(ssh['aria-label'], `${name} · SSH`)
+  assert.equal(remote['aria-label'], 'Remote · SFTP')
 })

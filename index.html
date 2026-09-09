@@ -8,7 +8,7 @@
   </head>
   <body>
     <div id="app" class="app-shell">
-      <aside class="sidebar">
+      <aside id="server-sidebar" class="sidebar">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">SL</div>
           <div>
@@ -17,7 +17,7 @@
           </div>
         </div>
         <label class="profile-search"><span aria-hidden="true">⌕</span><input id="profile-search" type="search" placeholder="搜索服务器" aria-label="搜索服务器"><kbd>⌘ K</kbd></label>
-        <button id="open-files" class="ghost-button files-nav" type="button">↔ 文件管理 · SFTP</button>
+        <button id="open-files" class="ghost-button files-nav" type="button"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7V5h6l2 2h10v13H3Z"/><path d="M3 10h18"/></svg><span>文件管理</span><small>SFTP</small></button>
         <div class="sidebar-heading">
           <span>服务器 <span id="profile-count">0</span></span>
           <button id="add-profile" class="icon-button" type="button" aria-label="新增服务器">＋</button>
@@ -31,7 +31,7 @@
 
       <main class="workspace">
         <header class="topbar">
-          <button id="sidebar-toggle" class="icon-button" type="button" aria-label="隐藏服务器侧栏" aria-expanded="true" title="隐藏服务器侧栏">◧</button>
+          <button id="sidebar-toggle" class="icon-button" type="button" aria-label="隐藏服务器侧栏" aria-expanded="true" aria-controls="server-sidebar" title="隐藏服务器侧栏"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16M5.5 8h1M5.5 12h1"/></svg></button>
           <div class="tab-strip">
             <button id="tabs-scroll-left" class="tab-scroll" type="button" aria-label="向左查看标签" title="向左查看标签" disabled>‹</button>
             <div id="session-tabs" class="session-tabs" role="tablist" aria-label="连接标签"></div>
@@ -55,10 +55,13 @@
         </section>
         <section id="terminal-stack" class="terminal-stack" aria-label="SSH 终端"></section>
         <section id="sftp-panel" class="sftp-panel hidden" aria-label="SFTP 文件管理器">
-          <div class="file-workspace-tools"><span title="拖动分隔线调整宽度；⌘L 编辑远程路径">文件工作空间 · ⌘F 筛选 · ⌘R 刷新</span><div><button id="files-scroll-left" class="ghost-button" type="button" aria-label="向左查看文件栏">←</button><button id="files-scroll-right" class="ghost-button" type="button" aria-label="向右查看文件栏">→</button><button id="select-servers" class="ghost-button" type="button">＋ 添加服务器</button></div></div>
+          <div class="file-workspace-tools">
+            <div class="file-workspace-title"><span class="workspace-emblem" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg></span><div><strong>文件工作台</strong><small title="拖动分隔线调整宽度；⌘L 编辑远程路径">本机与服务器并排浏览 · 拖拽传输</small></div></div>
+            <div><span class="workspace-shortcuts"><span><kbd>⌘ F</kbd> 筛选</span><span><kbd>⌘ R</kbd> 刷新</span></span><button id="files-scroll-left" class="icon-button" type="button" aria-label="向左查看文件栏" title="向左查看文件栏">←</button><button id="files-scroll-right" class="icon-button" type="button" aria-label="向右查看文件栏" title="向右查看文件栏">→</button><button id="select-servers" class="ghost-button" type="button">＋ 添加服务器</button></div>
+          </div>
           <div class="file-columns" tabindex="0" aria-label="横向滚动的文件栏">
           <section class="file-pane local-pane" aria-label="本机文件">
-            <div class="sftp-heading"><div><p class="eyebrow">LOCAL</p><h2>本机文件</h2></div><button id="local-home" class="ghost-button" type="button">用户目录</button></div>
+            <div class="sftp-heading"><div class="pane-heading-identity"><span class="pane-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M9 20h6m-3-4v4"/></svg></span><div><p class="eyebrow">LOCAL · 本地磁盘</p><h2>本机文件</h2></div></div><button id="local-home" class="ghost-button" type="button">用户目录</button></div>
             <div class="sftp-toolbar"><button id="local-parent" class="ghost-button" type="button">← 上一级</button><button id="local-refresh" class="ghost-button" type="button">刷新</button><code id="local-path" class="local-path">正在加载…</code></div>
             <div class="local-options"><label><input id="local-show-hidden" type="checkbox"> 显示隐藏文件</label><button id="local-upload" class="primary-button" type="button" disabled>上传所选</button></div>
             <div class="file-filter"><input id="local-filter" type="search" placeholder="筛选当前目录…" aria-label="筛选本机文件" autocomplete="off" spellcheck="false"><span>⌘ F</span></div>
@@ -66,7 +69,7 @@
             <footer class="sftp-footer"><span id="local-count">请选择文件</span><span>双击目录 · Shift 连选</span></footer>
           </section>
           <section id="add-server-pane" class="file-pane add-server-pane">
-            <div class="remote-empty"><div class="empty-glyph">＋</div><h3>添加服务器栏</h3><p>每台服务器独立浏览目录<br>左右滚动查看更多服务器</p><button id="empty-select-servers" class="primary-button" type="button">选择服务器 · 可多选</button></div>
+            <div class="remote-empty"><div class="empty-glyph" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="15" height="7" rx="2"/><path d="M6 6.5h1m4 0h4M8 14H5a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3m8-8v8m-4-4h8"/></svg></div><p class="eyebrow">YOUR FILES, CONNECTED</p><h3>连接你的服务器</h3><p>为每台服务器打开一个独立文件栏<br>把文件拖过去，传输就开始了</p><button id="empty-select-servers" class="primary-button" type="button">＋ 选择服务器 · 可多选</button><small>左右滚动浏览 · 拖动分隔线调整宽度</small></div>
           </section>
           </div>
           <div id="transfer-results" class="transfer-results hidden" role="status"></div>
@@ -197,8 +200,7 @@
     </dialog>
     <template id="remote-pane-template">
       <section class="file-pane remote-pane">
-        <div class="sftp-heading"><div><p class="eyebrow">REMOTE</p><h2 data-role="title"></h2></div><button data-role="close" class="icon-button" type="button" aria-label="关闭服务器文件栏">×</button></div>
-        <span data-role="target" class="sftp-meta remote-target"></span>
+        <div class="sftp-heading"><div class="pane-heading-identity"><span class="pane-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M6 6.5h1m4 0h7M6 17.5h1m4 0h7"/></svg></span><div><p data-role="target" class="eyebrow remote-target"></p><h2 data-role="title"></h2></div></div><button data-role="close" class="icon-button" type="button" aria-label="关闭服务器文件栏" title="关闭服务器文件栏">×</button></div>
         <div data-role="connectionState" class="sftp-connection-state hidden" role="status"><span data-role="connectionLabel"></span><button data-role="retry" class="ghost-button hidden" type="button">重试连接</button></div>
         <div class="sftp-toolbar"><form data-role="pathForm" class="path-form"><input data-role="path" class="sftp-path" aria-label="远程目录路径" spellcheck="false"><button class="text-button" type="submit">前往</button></form><button data-role="parent" class="ghost-button" type="button">← 上一级</button><button data-role="refresh" class="ghost-button" type="button">刷新</button><button data-role="mkdir" class="ghost-button" type="button">新建文件夹</button><button data-role="upload" class="primary-button" type="button" title="选择文件或文件夹上传">上传…</button></div>
         <label class="pane-target"><input data-role="selected" type="checkbox"> 作为本机文件上传目标</label>

@@ -56,3 +56,15 @@ test('long tab and SFTP titles truncate without shrinking the pane close button'
   assert.match(rules('.file-pane .sftp-heading h2'), /max-width:\s*100%/)
   assert.match(rules('.sftp-heading > button'), /flex-shrink:\s*0/)
 })
+
+test('card styling preserves fixed drag ghosts, file overflow and the immediate terminal overlay', () => {
+  // 拖影同时具有两个类；组合选择器避免普通标签的新定位规则把它拉回文档流。
+  assert.match(rules('.session-tab.tab-ghost'), /position:\s*fixed/)
+  assert.match(rules('.session-tab.tab-ghost'), /pointer-events:\s*none/)
+  assert.match(rules('.file-columns'), /overflow-x:\s*auto/)
+  assert.match(rules('.file-columns .file-pane'), /flex:\s*0\s+0\s+auto/)
+  assert.match(rules('.file-pane .sftp-table, .file-pane .local-table'), /min-width:\s*760px/)
+  assert.match(rules('.terminal-typeahead'), /transition:\s*none\s*!important/)
+  assert.match(rules('.terminal-typeahead'), /animation:\s*none\s*!important/)
+  assert.match(html, /id="sidebar-toggle"[^>]*aria-controls="server-sidebar"/)
+})
