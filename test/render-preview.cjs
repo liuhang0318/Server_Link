@@ -69,14 +69,18 @@ const bridge = `
     privateKeys: {},
     sessions: {
       onEvent: callback => { listener = callback; },
-      start: async () => {
+      start: async profileId => {
         const sessionId = 'preview-' + (++sessionCount);
         setTimeout(() => listener({ type: 'progress', sessionId, phase: 'verifying', logs: 'Connection established.\\nChecking server host key.' }), 100);
         setTimeout(() => listener({ type: 'progress', sessionId, phase: 'connected', logs: 'Authenticated to loopback using publickey.' }), 4000);
-        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\nsmoketest$ ' }), 4100);
+        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\n[' + (profiles.find(item => item.id === profileId)?.username || 'developer') + '@preview ~]$ ' }), 4100);
         return { sessionId };
       },
-      write: async (sessionId, data) => listener({ type: 'data', sessionId, data }),
+      // ?slow-echo 模拟网络回显延迟，区分即时本地草稿和稍后返回的终端输出。
+      write: async (sessionId, data) => {
+        setTimeout(() => listener({ type: 'data', sessionId, data: data === '\\x7f' ? '\\b \\b' : data }), new URLSearchParams(location.search).has('slow-echo') ? 1200 : 0);
+        return true;
+      },
       resize: async () => {},
       close: async sessionId => listener({ type: 'exit', sessionId, exitCode: 0 })
     },

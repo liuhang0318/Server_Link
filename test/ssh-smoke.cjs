@@ -168,6 +168,7 @@ async function main () {
     }))
   })
   let resizeReceived = false
+  let shellEchoDelay = 0
   const transferControls = {}
   const server = new Server({ hostKeys: [hostKey.private] }, client => {
     clients.add(client)
@@ -193,9 +194,20 @@ async function main () {
         })
         session.on('shell', accept => {
           const shell = accept()
+          let input = ''
           shell.write('SERVERLINK_READY 中文\r\n')
           shell.on('data', data => {
-            if (data.toString().includes('ping')) shell.write('SERVERLINK_PONG\r\n')
+            input += data.toString()
+            // 测试 shell 不执行任何命令；按行回显探针，允许 SSH 任意拆分输入包。
+            let end
+            while ((end = input.search(/[\r\n]/u)) !== -1) {
+              const line = input.slice(0, end)
+              input = input.slice(end + 1)
+              if (line === 'ping') shell.write('SERVERLINK_PONG\r\n')
+              if (/^SERVERLINK_ECHO_\d+$/u.test(line)) {
+                setTimeout(() => shell.write(`${line}\r\n`), shellEchoDelay)
+              }
+            }
           })
         })
         session.on('sftp', accept => attachSftp(accept(), sftpRoot, transferControls))
@@ -228,13 +240,16 @@ async function main () {
     const store = new ProfileStore(path.join(directory, 'profiles'))
     const base = { name: 'Loopback smoke', host: '127.0.0.1', port: server.address().port, username: 'smoketest' }
 
-    async function connect (auth, expectTrust) {
+    async function connect (auth, expectTrust, measureLatency = false) {
       const created = await store.create({ ...base, auth, privateKeyPath: auth === 'key' ? keyPath : null })
       const profile = await new ProfileStore(store.directoryPath).get(created.id)
       let output = ''
       let trustPrompts = 0
       let passwordSent = false
       let connected = false
+      let pingSent = false
+      let echoProbe = null
+      let probeSequence = 0
       let resolveData
       let resolveExit
       const dataReady = new Promise(resolve => { resolveData = resolve })
@@ -249,6 +264,12 @@ async function main () {
         }
         if (event.type !== 'data') return
         output += event.data
+        if (echoProbe && output.includes(echoProbe.token)) {
+          const probe = echoProbe
+          echoProbe = null
+          clearTimeout(probe.timeout)
+          probe.resolve(performance.now() - probe.started)
+        }
         if (!trustPrompts && output.includes('Are you sure you want to continue connecting')) {
           trustPrompts++
           manager.write(1, session.sessionId, 'yes\r')
@@ -257,7 +278,8 @@ async function main () {
           passwordSent = true
           manager.write(1, session.sessionId, `${password}\r`)
         }
-        if (output.includes('SERVERLINK_READY') && !output.includes('SERVERLINK_PONG')) {
+        if (!pingSent && output.includes('SERVERLINK_READY')) {
+          pingSent = true
           manager.resize(1, session.sessionId, 91, 31)
           manager.write(1, session.sessionId, 'ping\r')
         }
@@ -275,18 +297,42 @@ async function main () {
         assert.match(output, /中文/u)
         assert.equal(connected, true)
         await assert.rejects(fs.access(manager.sessions.get(session.sessionId).logDirectory), { code: 'ENOENT' })
+        if (measureLatency) {
+          // 此计时只覆盖 manager → 原生 PTY/OpenSSH → 回环 SSH 服务 → manager，
+          // 不包含 Electron IPC 或 xterm 绘制，不能据此声称真实网络/界面同样快。
+          const measureEcho = () => new Promise((resolve, reject) => {
+            const token = `SERVERLINK_ECHO_${++probeSequence}`
+            const probe = { token, started: performance.now(), resolve }
+            probe.timeout = setTimeout(() => reject(new Error('SSH echo probe timed out')), 3000)
+            echoProbe = probe
+            manager.write(1, session.sessionId, `${token}\r`)
+          })
+          const samples = []
+          for (let index = 0; index < 7; index++) samples.push(await measureEcho())
+          samples.sort((left, right) => left - right)
+          shellEchoDelay = 180
+          const delayedEcho = measureEcho()
+          await new Promise(resolve => setTimeout(resolve, 80))
+          assert.notEqual(echoProbe, null, 'terminal output must wait for remote echo; never blindly echo input')
+          const delayed = await delayedEcho
+          shellEchoDelay = 0
+          assert.ok(delayed >= 170, `injected 180 ms echo delay was not observed: ${delayed}`)
+          console.log(`ssh-input-latency (native loopback, excluding renderer/IPC): p50=${samples[3].toFixed(1)} ms, max=${samples.at(-1).toFixed(1)} ms; injected remote echo 180 ms=${delayed.toFixed(1)} ms`)
+        }
         manager.close(1, session.sessionId)
         await exited
         assert.equal(manager.sessions.size, 0)
         console.log(`${auth}: host trust, authentication, terminal input/output, close passed`)
       } finally {
         clearTimeout(timeout)
+        if (echoProbe) clearTimeout(echoProbe.timeout)
+        shellEchoDelay = 0
       }
     }
 
     await connect('key', true)
     await connect('password', false)
-    await connect('key', false)
+    await connect('key', false, true)
     assert.equal(resizeReceived, true)
 
     async function connectSftp (auth, port = server.address().port) {

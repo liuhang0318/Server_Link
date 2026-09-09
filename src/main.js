@@ -8,6 +8,7 @@ import { groupProfiles } from './profile-groups.mjs'
 import { connectBatch } from './connection-batch.mjs'
 import { filterFiles, refreshedSelection, selectFileRange, isUploadableEntry } from './file-browser.mjs'
 import { animateSurface } from './motion.mjs'
+import { TerminalTypeahead } from './terminal-typeahead.mjs'
 
 const api = window.serverLink
 document.querySelector('#app-version').textContent = `SSH & SFTP · v${version}`
@@ -33,6 +34,7 @@ const elements = {
   tabs: document.querySelector('#session-tabs'),
   sessionStatus: document.querySelector('#session-status'),
   reconnect: document.querySelector('#reconnect-session'),
+  typeaheadToggle: document.querySelector('#toggle-typeahead'),
   close: document.querySelector('#close-session'),
   emptyState: document.querySelector('#empty-state'),
   terminalStack: document.querySelector('#terminal-stack'),
@@ -421,7 +423,8 @@ function createTerminalSession (sessionId, profile) {
   const terminal = new Terminal({
     cursorBlink: true,
     cursorStyle: 'bar',
-    allowTransparency: true,
+    // 终端背景始终不透明，不为每个会话额外开启透明绘制。
+    allowTransparency: false,
     convertEol: true,
     fontFamily: '"SFMono-Regular", "Cascadia Code", Menlo, monospace',
     fontSize: 14,
@@ -506,8 +509,26 @@ function createTerminalSession (sessionId, profile) {
     logs: '',
     inputDisposable: null
   }
+  // 预显只画在原光标处；真实按键仍经原 IPC 立即发送，控制器不拥有网络写入能力。
+  session.typeaheadEnabled = true
+  session.typeahead = new TerminalTypeahead(terminal, terminalMount, { username: profile.username, enabled: true })
+  session.typeaheadDisposables = [
+    terminal.onResize(() => session.typeahead.reset()),
+    terminal.onScroll(() => {
+      // 真实输出滚到屏幕底部仍可确认回显；只有用户查看历史时才撤销覆盖层。
+      if (terminal.buffer.active.viewportY !== terminal.buffer.active.baseY) session.typeahead.reset()
+    }),
+    terminal.buffer.onBufferChange(() => session.typeahead.reset())
+  ]
   session.inputDisposable = terminal.onData(data => {
+    // 预显是显示优化，任何绘制异常都不能阻止真实按键发送。
+    try {
+      if (session.connected && session.status === 'running') session.typeahead.input(data)
+    } catch {
+      session.typeahead.reset()
+    }
     api.sessions.write(sessionId, data).catch(error => {
+      session.typeahead.reset()
       terminal.writeln(`\r\n\x1b[31m${errorMessage(error)}\x1b[0m`)
     })
   })
@@ -1654,6 +1675,9 @@ function syncWorkspaceState () {
   elements.close.disabled = !hasView
   elements.close.classList.toggle('hidden', !hasView)
   elements.reconnect.classList.toggle('hidden', !session)
+  elements.typeaheadToggle.classList.toggle('hidden', !session)
+  elements.typeaheadToggle.disabled = !session?.connected || session.status !== 'running'
+  elements.typeaheadToggle.setAttribute('aria-pressed', String(Boolean(session?.typeaheadEnabled)))
 
   if (state.sftpActive && state.sftp) {
     elements.sessionStatus.textContent = state.sftp.status === 'ready' ? 'SFTP 已连接' : state.sftp.status === 'failed' ? 'SFTP 连接失败' : 'SFTP 连接中'
@@ -1682,7 +1706,9 @@ function handleSessionEvent (payload) {
   }
 
   if (payload.type === 'data' && typeof payload.data === 'string') {
-    session.terminal.write(payload.data)
+    // 真实输出仍由 xterm 解析；预显在解析后确认/撤销，不伪造终端历史或执行结果。
+    if (session.typeahead) session.typeahead.output(payload.data)
+    else session.terminal.write(payload.data)
     if (!session.connected && !session.showLogs) {
       session.showLogs = true
       syncTerminalPresentation(session)
@@ -1699,6 +1725,7 @@ function handleSessionEvent (payload) {
   } else if (payload.type === 'status' && payload.status === 'running') {
     session.status = 'running'
   } else if (payload.type === 'exit') {
+    session.typeahead?.reset()
     session.status = 'exited'
     session.terminal.writeln(`\r\n\x1b[90m[连接已结束，退出码 ${payload.exitCode ?? '未知'}]\x1b[0m`)
     syncTerminalPresentation(session)
@@ -1732,6 +1759,8 @@ async function removeSession (session, requestClose) {
   if (state.sessions.get(session.id) !== session) return
   const wasActive = !state.sftpActive && state.activeSessionId === session.id
   const shouldClose = requestClose && session.status !== 'exited'
+  for (const disposable of session.typeaheadDisposables ?? []) disposable.dispose()
+  session.typeahead?.dispose()
   session.inputDisposable?.dispose()
   session.terminal.dispose()
   session.container.remove()
@@ -1907,6 +1936,14 @@ elements.tabs.addEventListener('click', event => {
   }
 }, true)
 elements.close.addEventListener('click', () => closeActiveSession())
+elements.typeaheadToggle.addEventListener('click', () => {
+  const session = !state.sftpActive && state.sessions.get(state.activeSessionId)
+  if (!session) return
+  session.typeaheadEnabled = !session.typeaheadEnabled
+  session.typeahead.setEnabled(session.typeaheadEnabled)
+  syncWorkspaceState()
+  session.terminal.focus()
+})
 folderForm.addEventListener('submit', submitSftpDirectory)
 document.querySelector('#folder-cancel').addEventListener('click', () => folderDialog.close())
 document.querySelector('#folder-cancel-x').addEventListener('click', () => folderDialog.close())

@@ -310,6 +310,11 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .file-pane .local-table th:nth-child(2) { width: 280px; }
 .file-pane .local-table th:nth-child(5) { width: 180px; }
 .ssh-terminal-mount { position: absolute; inset: 0; }
+/* 原位预显层不接管焦点、不改变终端行高；不能加过渡，否则打字会再次出现视觉延迟。 */
+.terminal-typeahead { color: #dbe5f5; background: #11161e; transition: none !important; animation: none !important; }
+.terminal-typeahead[hidden] { display: none; }
+.terminal-typeahead-caret { position: absolute; top: 0; width: 0; height: 100%; border-left: 1px solid #68e0ba; }
+#toggle-typeahead[aria-pressed="true"] { color: var(--accent); border-color: #527f6d; background: #22382e; }
 .connection-card { width: min(640px, 90%); margin: 9vh auto 0; padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: #1a2330; }
 .connection-identity { display: flex; align-items: center; gap: 18px; }
 .connection-identity > div { min-width: 0; }

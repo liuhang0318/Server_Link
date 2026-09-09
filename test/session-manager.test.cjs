@@ -21,7 +21,7 @@ const profile = Object.freeze({
 })
 
 function createManager () {
-  const calls = { kills: [] }
+  const calls = { kills: [], resizes: [] }
   let exitListener
   const processHandle = {
     onData: () => ({ dispose: () => {} }),
@@ -29,7 +29,8 @@ function createManager () {
       exitListener = listener
       return { dispose: () => {} }
     },
-    kill: signal => calls.kills.push(signal)
+    kill: signal => calls.kills.push(signal),
+    resize: (cols, rows) => calls.resizes.push([cols, rows])
   }
   const manager = new SessionManager({
     knownHostsPath: '/tmp/serverlink-known-hosts',
@@ -70,6 +71,18 @@ test('closeAllAndWait resolves immediately when there are no sessions', async ()
   const manager = new SessionManager({ knownHostsPath: '/tmp/serverlink-known-hosts' })
 
   assert.equal(await manager.closeAllAndWait(), true)
+})
+
+test('duplicate terminal dimensions do not trigger repeated native resize notifications', () => {
+  const harness = createManager()
+  const session = harness.manager.start(1, profile, () => {})
+  harness.manager.resize(1, session.sessionId, 100, 30)
+  harness.manager.resize(1, session.sessionId, 120, 40)
+  harness.manager.resize(1, session.sessionId, 120, 40)
+  assert.deepEqual(harness.calls.resizes, [[120, 40]])
+  assert.throws(() => harness.manager.resize(2, session.sessionId, 120, 40), /not found/u)
+  harness.manager.close(1, session.sessionId)
+  harness.exit({ exitCode: 0, signal: 15 })
 })
 
 test('closeAllAndWait resolves when the final PTY exits', async () => {
