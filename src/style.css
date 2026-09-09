@@ -214,6 +214,13 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .local-table th:nth-child(3) { width: 70px; }
 .local-table th:nth-child(4) { width: 62px; }
 .local-table tr:hover { background: #22303d; }
+.local-table tr.file-selected { background: #243e35; }
+.local-table tr.file-selected td { color: #d2e9e1; }
+.file-filter { display: flex; align-items: center; gap: 12px; padding: 0 12px 12px; color: var(--muted); font-size: 11px; }
+.file-filter > input { min-width: 0; flex: 1; height: 32px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: #131b26; }
+.file-filter label { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.file-filter input[type="checkbox"] { accent-color: var(--accent); }
+.file-filter input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .local-table .sftp-name:disabled { opacity: 1; }
 .local-table input, .local-options input, .remote-choice input { accent-color: var(--accent); }
 #local-message:empty { display: none; }

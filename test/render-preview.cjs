@@ -26,7 +26,8 @@ const bridge = `
       list: async id => ({ id: id || 'local-home', path: id === 'local-folder' ? '/Users/demo/Documents' : '/Users/demo', parentId: id === 'local-folder' ? 'local-home' : null, entries: [
         { id: 'local-folder', name: 'Documents', type: 'directory', size: 0, modifiedAt: '2026-09-08T02:00:00.000Z' },
         { id: 'local-file-1', name: 'server-config.json', type: 'file', size: 2048, modifiedAt: '2026-09-08T02:00:00.000Z' },
-        { id: 'local-file-2', name: 'release.tar.gz', type: 'file', size: 4280044, modifiedAt: '2026-09-08T02:00:00.000Z' }
+        { id: 'local-file-2', name: 'release.tar.gz', type: 'file', size: 4280044, modifiedAt: '2026-09-08T02:00:00.000Z' },
+        { id: 'local-file-3', name: '.env.example', type: 'file', size: 128, modifiedAt: '2026-09-08T02:00:00.000Z' }
       ] }),
       upload: async (ids, targets) => {
         const results = [];
@@ -62,7 +63,7 @@ const bridge = `
     sftp: {
       onProgress: callback => { progressListener = callback; },
       cancelConnect: async () => {},
-      // 仅模拟加密密钥的提示分支，不读取路径，不校验或保存输入，也不发出网络请求。
+      // 仅模拟连接延迟，不读取路径、不校验或保存输入，也不发出网络请求。
       connect: async (profileId, secret) => {
         await new Promise(resolve => setTimeout(resolve, profileId === 'render-fixture' ? 1500 : 10000));
         return {
@@ -71,7 +72,8 @@ const bridge = `
         entries: [
           { name: 'releases', type: 'directory', size: 0, modifiedAt: '2026-09-08T01:20:00.000Z' },
           { name: 'serverlink.tar.gz', type: 'file', size: 1280440, modifiedAt: '2026-09-08T02:30:00.000Z' },
-          { name: 'current', type: 'symlink', size: 18, modifiedAt: '2026-09-08T02:31:00.000Z' }
+          { name: 'current', type: 'symlink', size: 18, modifiedAt: '2026-09-08T02:31:00.000Z' },
+          { name: '.env.example', type: 'file', size: 128, modifiedAt: '2026-09-08T02:31:00.000Z' }
         ]
         };
       },
