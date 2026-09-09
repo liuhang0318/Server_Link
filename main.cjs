@@ -2,7 +2,7 @@
 
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
-const { app, BrowserWindow, dialog, ipcMain, session } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, session } = require('electron')
 const { ProfileStore } = require('./lib/profile-store.cjs')
 const { SessionManager } = require('./lib/session-manager.cjs')
 const { LocalFiles } = require('./lib/local-files.cjs')
@@ -48,6 +48,42 @@ function assertMainFrame (event) {
 /** Resolves an IPC sender only to its still-owned application window. */
 function windowForSender (sender) {
   return BrowserWindow.getAllWindows().find(window => window.webContents === sender) ?? null
+}
+
+/** 关闭快捷键只通知当前可信窗口，由界面按当前连接和传输状态决定是否关闭。 */
+function closeFocusedConnection () {
+  const window = BrowserWindow.getFocusedWindow()
+  if (quitPending || !window || window.isDestroyed() || !BrowserWindow.getAllWindows().includes(window)) return
+  const sender = window.webContents
+  if (sender.isDestroyed() || sender.getURL() !== bundledRendererUrl || sender.mainFrame.url !== bundledRendererUrl) return
+
+  // 不使用最近窗口兜底，也不直接销毁窗口，避免操作对话框时误关另一台服务器。
+  sender.send('app:action', 'close-connection')
+}
+
+/** 使用系统菜单接管应用快捷键，同时保留输入框和终端的原生编辑操作。 */
+function registerApplicationMenu () {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    {
+      label: 'ServerLink',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        // 原生 quit 继续经过既有窗口销毁和 PTY/SFTP 清理，不向 renderer 开放退出权限。
+        { role: 'quit', label: '退出 ServerLink', accelerator: 'CmdOrCtrl+Q' }
+      ]
+    },
+    {
+      label: '连接',
+      submenu: [{ id: 'close-connection', label: '关闭当前连接', accelerator: 'CmdOrCtrl+W', click: closeFocusedConnection }]
+    },
+    { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] }
+  ]))
 }
 
 /** Requires an explicit native confirmation before persisting first-use host trust. */
@@ -282,6 +318,11 @@ function createWindow () {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   window.webContents.on('will-attach-webview', event => event.preventDefault())
+  window.webContents.on('before-input-event', (event, input) => {
+    const command = process.platform === 'darwin' ? input.meta : input.control
+    // 长按 ⌘W 只关闭第一次选中的连接，后续重复键不得顺着相邻选择连续关闭。
+    if (input.type === 'keyDown' && input.isAutoRepeat && command && !input.alt && !input.shift && input.key.toLowerCase() === 'w') event.preventDefault()
+  })
   window.webContents.on('render-process-gone', () => {
     localFiles.closeOwner(ownerId)
     sessionManager.closeOwner(ownerId)
@@ -344,6 +385,7 @@ if (!hasSingleInstanceLock) {
     await profileStore.init()
     await sessionManager.init()
     registerIpc()
+    registerApplicationMenu()
 
     // Permission APIs and response headers remain locked even if future UI code regresses.
     session.defaultSession.setPermissionCheckHandler(() => false)
@@ -392,7 +434,8 @@ app.on('will-quit', event => {
     console.error('ServerLink sessions failed to close cleanly:', error)
   }).finally(() => {
     shutdownComplete = true
-    app.quit()
+    // 先让 Electron 的 will-quit 原生回调退栈；已完成清理的微任务直接重入 quit 可能被忽略。
+    setImmediate(() => app.quit())
   })
 })
 app.on('window-all-closed', () => {

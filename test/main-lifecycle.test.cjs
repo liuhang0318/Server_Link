@@ -30,8 +30,10 @@ async function createMainHarness () {
     willQuitEvents: 0,
     sessionStarts: 0,
     uploads: [],
-    progress: []
+    progress: [],
+    menu: null
   }
+  let focusedWindow = null
   let nextWebContentsId = 1
   let resolveSessionCleanup
   const pendingProfileReads = []
@@ -42,10 +44,11 @@ async function createMainHarness () {
       super()
       this.id = nextWebContentsId++
       this.mainFrame = { url: rendererUrl }
+      this.url = rendererUrl
       this.destroyed = false
     }
 
-    getURL () { return rendererUrl }
+    getURL () { return this.url }
     isDestroyed () { return this.destroyed }
     setWindowOpenHandler () {}
     send (channel, payload) { calls.progress.push({ ownerId: this.id, channel, payload }) }
@@ -62,9 +65,12 @@ async function createMainHarness () {
       calls.createdWindows++
       this.webContents = new FakeWebContents()
       windows.push(this)
+      focusedWindow = this
     }
 
     static getAllWindows () { return windows.slice() }
+    static getFocusedWindow () { return focusedWindow }
+    isDestroyed () { return this.webContents.destroyed }
     loadFile () { return Promise.resolve() }
 
     close () {
@@ -78,6 +84,7 @@ async function createMainHarness () {
     destroy () {
       const index = windows.indexOf(this)
       if (index !== -1) windows.splice(index, 1)
+      if (focusedWindow === this) focusedWindow = null
       this.webContents.destroy()
     }
   }
@@ -152,12 +159,18 @@ async function createMainHarness () {
     ipcHandlers,
     resolveProfile: profile => pendingProfileReads.shift()(profile),
     resolveSessionCleanup,
+    createWindow: () => new FakeBrowserWindow(),
+    focusWindow: window => { focusedWindow = window },
     windows
   }
   const electron = {
     app: harness.app,
     BrowserWindow: FakeBrowserWindow,
     dialog: {},
+    Menu: {
+      buildFromTemplate: template => template,
+      setApplicationMenu: menu => { calls.menu = menu }
+    },
     ipcMain: {
       handle: (channel, handler) => ipcHandlers.set(channel, handler)
     },
@@ -173,6 +186,7 @@ async function createMainHarness () {
   vm.runInNewContext(mainSource, {
     __dirname: projectDirectory,
     console,
+    setImmediate,
     process: { platform: 'darwin' },
     require: moduleName => {
       if (moduleName === 'electron') return electron
@@ -211,6 +225,10 @@ test('main closes renderers before PTY wait and rejects their pending session st
   const sender = harness.windows[0].webContents
   const request = startSession(harness, sender)
 
+  const quitItem = harness.calls.menu.flatMap(menu => menu.submenu).find(item => item.role === 'quit')
+  assert.equal(quitItem.accelerator, 'CmdOrCtrl+Q')
+  assert.equal(quitItem.click, undefined)
+  // Electron 的 quit role 调用 app.quit；继续验证它没有绕过既有退出清理链。
   harness.app.quit()
 
   assert.deepEqual(harness.calls.closeAllWindowCounts, [0])
@@ -227,8 +245,65 @@ test('main closes renderers before PTY wait and rejects their pending session st
 
   // Finish the intercepted quit so the harness leaves no pending lifecycle work.
   harness.resolveSessionCleanup(true)
+  // 清理已完成也不能在 Promise 微任务里重入原生退出事件，必须等下一轮主循环。
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(harness.calls.quitCalls, 1)
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(harness.app.quitAccepted, true)
+})
+
+test('native close shortcut targets only the focused trusted window and never closes its window', async () => {
+  const harness = await createMainHarness()
+  const original = harness.windows[0]
+  const other = harness.createWindow()
+  const entries = harness.calls.menu.flatMap(menu => menu.submenu)
+  const closeItem = entries.find(item => item.id === 'close-connection')
+  assert.equal(closeItem.accelerator, 'CmdOrCtrl+W')
+  assert.equal(entries.some(item => item.role === 'close'), false)
+  for (const role of ['cut', 'copy', 'paste', 'selectAll']) assert.ok(entries.some(item => item.role === role))
+
+  harness.focusWindow(original)
+  closeItem.click()
+  assert.deepEqual(harness.calls.progress, [{ ownerId: original.webContents.id, channel: 'app:action', payload: 'close-connection' }])
+  assert.equal(harness.windows.length, 2)
+  assert.equal(harness.calls.quitCalls, 0)
+
+  // 无焦点、外来窗口、页面变化、已销毁窗口均不能兜底到仍存活的另一窗口。
+  harness.focusWindow(null)
+  closeItem.click()
+  harness.focusWindow({ isDestroyed: () => false, webContents: original.webContents })
+  closeItem.click()
+  harness.focusWindow(other)
+  other.webContents.url = 'https://example.com'
+  closeItem.click()
+  other.webContents.url = original.webContents.url
+  other.webContents.mainFrame.url = 'https://example.com'
+  closeItem.click()
+  other.destroy()
+  harness.focusWindow(other)
+  closeItem.click()
+  assert.equal(harness.calls.progress.length, 1)
+  assert.equal(harness.windows.length, 1)
+})
+
+test('native close shortcut ignores repeat keys without blocking ordinary edit shortcuts', async () => {
+  const harness = await createMainHarness()
+  const sender = harness.windows[0].webContents
+  const inputs = [
+    [{ type: 'keyDown', key: 'w', meta: true, isAutoRepeat: true }, true],
+    [{ type: 'keyDown', key: 'W', meta: true, isAutoRepeat: true }, true],
+    [{ type: 'keyDown', key: 'w', meta: true, isAutoRepeat: false }, false],
+    [{ type: 'keyUp', key: 'w', meta: true, isAutoRepeat: true }, false],
+    [{ type: 'keyDown', key: 'w', control: true, isAutoRepeat: true }, false],
+    [{ type: 'keyDown', key: 'w', meta: true, shift: true, isAutoRepeat: true }, false],
+    [{ type: 'keyDown', key: 'c', meta: true, isAutoRepeat: true }, false]
+  ]
+  for (const [input, prevented] of inputs) {
+    const event = createCancelableEvent()
+    sender.emit('before-input-event', event, input)
+    assert.equal(event.defaultPrevented, prevented)
+  }
 })
 
 test('canceling a window close never enters will-quit and leaves connections available', async () => {

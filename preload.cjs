@@ -57,6 +57,17 @@ function getPathForDroppedPrivateKey (file) {
 }
 
 const api = Object.freeze({
+  app: Object.freeze({
+    /** 单向接收明确的原生菜单动作，不泄漏 Electron 事件或开放通用 IPC。 */
+    onAction: listener => {
+      if (typeof listener !== 'function') throw new TypeError('listener must be a function')
+      const wrapped = (_event, action) => {
+        if (action === 'close-connection') listener(action)
+      }
+      ipcRenderer.on('app:action', wrapped)
+      return () => ipcRenderer.removeListener('app:action', wrapped)
+    }
+  }),
   local: Object.freeze({
     list: (directoryId = null) => ipcRenderer.invoke('local:list', directoryId === null ? null : requireString(directoryId, 'directoryId')),
     upload: (fileIds, targets) => ipcRenderer.invoke('local:upload', fileIds, targets)

@@ -7,6 +7,7 @@ import { moveTab, tabScrollState } from './tab-order.mjs'
 import { groupProfiles } from './profile-groups.mjs'
 import { connectBatch } from './connection-batch.mjs'
 import { filterFiles, refreshedSelection, selectFileRange } from './file-browser.mjs'
+import { animateSurface } from './motion.mjs'
 
 const api = window.serverLink
 document.querySelector('#app-version').textContent = `SSH & SFTP · v${version}`
@@ -95,6 +96,7 @@ let batchVisited = false
 let profileSaving = false
 let folderConnection = null
 let notificationTimer
+let presentedView = null
 
 /** 非阻塞反馈保留终端输入焦点；错误需用户关闭，成功提示自动消失。 */
 function notify (message, isError = false) {
@@ -102,6 +104,7 @@ function notify (message, isError = false) {
   document.querySelector('#notification-text').textContent = message
   notification.classList.remove('hidden')
   notification.classList.toggle('error', isError)
+  animateSurface(notification)
   if (!isError) notificationTimer = setTimeout(() => notification.classList.add('hidden'), 4500)
 }
 
@@ -711,6 +714,7 @@ function createRemotePane (connection) {
   bindSftpDropTarget(pane, () => connection)
   addPaneResize(pane)
   document.querySelector('.file-columns').insertBefore(pane, document.querySelector('#add-server-pane'))
+  animateSurface(pane)
 }
 
 /** 每台服务器独立记录操作状态，切换标签不丢失传输反馈。 */
@@ -898,6 +902,7 @@ async function connectSftp (profileId, { activate = true, quiet = false, connect
     uploadTargets.add(result.connectionId)
     setSftpBusy(false, '', connection)
     renderSftpFiles(connection)
+    animateSurface(connection.ui.pane.querySelector('.sftp-table-wrap'))
     renderTabs()
     renderRemoteChoices()
     syncWorkspaceState()
@@ -1264,6 +1269,7 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
 function activateSftp (connectionId = state.sftp?.connectionId, { scroll = true } = {}) {
   const connection = state.sftpConnections.get(connectionId)
   if (!connection) return
+  const changed = !state.sftpActive || state.sftp !== connection
   state.sftp = connection
   state.filesOpen = true
   state.sftpActive = true
@@ -1272,6 +1278,7 @@ function activateSftp (connectionId = state.sftp?.connectionId, { scroll = true 
   syncWorkspaceState()
   renderSftpFiles()
   renderRemoteChoices()
+  if (changed) animateSurface(connection.ui.pane.querySelector('.sftp-heading'), 'settle')
   if (scroll) connection.ui.pane.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
   if (!localDirectory) loadLocalDirectory(null)
 }
@@ -1565,6 +1572,12 @@ function syncWorkspaceState () {
   elements.emptyState.classList.toggle('hidden', hasView)
   elements.terminalStack.classList.toggle('active', Boolean(session))
   elements.sftpPanel.classList.toggle('hidden', !state.sftpActive)
+  const view = session?.container ?? (state.sftpActive ? elements.sftpPanel : elements.emptyState)
+  // 高频终端输出和握手事件只更新状态，不能反复触发内容入场、打断输入视觉。
+  if (presentedView !== view) {
+    presentedView = view
+    animateSurface(view, 'settle')
+  }
   elements.reconnect.disabled = !session
   elements.close.disabled = !hasView
   elements.close.classList.toggle('hidden', !hasView)
@@ -1691,6 +1704,16 @@ async function closeActiveSession () {
   }
   const session = state.sessions.get(state.activeSessionId)
   if (session) await removeSession(session, true)
+}
+
+/** 原生 ⌘W 只关闭选中的服务器；模态输入和文件传输中不误关会话或整个窗口。 */
+function handleAppAction (action) {
+  if (action !== 'close-connection') return
+  if (document.querySelector('dialog[open]')) return notify('请先完成或取消当前对话框，再关闭连接')
+  if (state.sftpActive && !state.sftp) return notify('当前是本机文件，请先选择要关闭的服务器标签')
+  if (!state.sftpActive && !state.sessions.has(state.activeSessionId)) return
+  // 与工具栏共用忙碌保护和归属检查，不在快捷键路径另写一套关闭逻辑。
+  closeActiveSession().catch(error => notify(errorMessage(error), true))
 }
 
 const resizeObserver = new window.ResizeObserver(() => {
@@ -1906,6 +1929,7 @@ elements.secretDialog.addEventListener('cancel', event => {
 })
 api.sessions.onEvent(handleSessionEvent)
 api.sftp.onProgress(handleUploadProgress)
+api.app.onAction(handleAppAction)
 
 try {
   state.profiles = await api.profiles.list()

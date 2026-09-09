@@ -67,7 +67,8 @@ test('preload exposes only a validated dropped-File path capability', () => {
     }
   })
 
-  assert.deepEqual(Object.keys(exposedApi).sort(), ['local', 'privateKeys', 'profiles', 'sessions', 'sftp'])
+  assert.deepEqual(Object.keys(exposedApi).sort(), ['app', 'local', 'privateKeys', 'profiles', 'sessions', 'sftp'])
+  assert.deepEqual(Object.keys(exposedApi.app), ['onAction'])
   assert.deepEqual(Object.keys(exposedApi.privateKeys), ['getPathForFile'])
   assert.deepEqual(Object.keys(exposedApi.sftp).sort(), [
     'cancelConnect', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onProgress', 'remove', 'upload', 'uploadFiles'
@@ -100,6 +101,18 @@ test('preload exposes only a validated dropped-File path capability', () => {
   progressListener({ sender: 'must-not-cross-bridge' }, progress)
   assert.equal(forwarded, progress)
   unsubscribe()
+
+  let actionListener
+  const actions = []
+  ipcRenderer.on = (channel, listener) => { assert.equal(channel, 'app:action'); actionListener = listener }
+  ipcRenderer.removeListener = (channel, listener) => { assert.equal(channel, 'app:action'); assert.equal(listener, actionListener) }
+  assert.throws(() => exposedApi.app.onAction(null), /listener must be a function/u)
+  const stopActions = exposedApi.app.onAction((...args) => actions.push(args))
+  const nativeEvent = { sender: 'must-not-cross-bridge' }
+  for (const value of ['quit', 'unknown', null, {}, ['close-connection']]) actionListener(nativeEvent, value)
+  actionListener(nativeEvent, 'close-connection')
+  assert.deepEqual(actions, [['close-connection']])
+  stopActions()
 })
 
 test('ssh builder returns fixed executable and separated hardened argv', () => {
