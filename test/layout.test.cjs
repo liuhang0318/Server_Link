@@ -28,19 +28,40 @@ test('workspace bounds the tab track independently of the fixed session controls
   assert.match(rules('.sidebar-hidden .topbar'), /padding-left:\s*88px/)
 })
 
-test('tab navigation stays outside the scroll area and icon-only actions retain accessible names', () => {
+test('compact toolbar keeps named navigation and status without redundant session controls', () => {
   const header = html.slice(html.indexOf('<header class="topbar">'), html.indexOf('</header>'))
   assert.match(header, /id="tabs-scroll-left"[\s\S]*?<div id="session-tabs"[^>]*><\/div>[\s\S]*?id="tabs-scroll-right"[\s\S]*?<\/div>\s*<div class="session-actions">/)
   assert.match(header, /id="session-tabs"[^>]*role="tablist"[^>]*aria-label="[^"]+"/)
-  for (const id of ['tabs-scroll-left', 'tabs-scroll-right', 'reconnect-session', 'close-session']) {
+  for (const id of ['tabs-scroll-left', 'tabs-scroll-right']) {
     const button = header.match(new RegExp(`<button\\b[^>]*\\bid="${id}"[^>]*>`))?.[0]
     assert.ok(button, id)
     assert.match(button, /type="button"/, id)
     assert.match(button, /aria-label="[^"]+"/, id)
     assert.match(button, /title="[^"]+"/, id)
   }
+  for (const id of ['toggle-typeahead', 'reconnect-session', 'close-session']) {
+    assert.doesNotMatch(header, new RegExp(`id="${id}"`))
+  }
+  assert.match(header, /id="session-status"/)
   assert.match(css, /@media\s*\(max-width:\s*1050px\)/)
-  assert.match(rules('.session-actions .action-label'), /display:\s*none/)
+  assert.doesNotMatch(css, /#toggle-typeahead|\.session-action(?!s)\b|\.action-label\b/)
+})
+
+test('SSH tab selection and close affordance remain compact and keyboard-visible', () => {
+  assert.match(rules('.session-tab'), /height:\s*38px/)
+  assert.match(rules('.session-tab'), /max-width:\s*216px/)
+  assert.match(rules('.session-tab[data-kind="ssh"]'), /-webkit-app-region:\s*no-drag/)
+  assert.match(rules('.tab-select'), /min-width:\s*0/)
+  assert.match(rules('.tab-select'), /flex:\s*1(?:;|\s*$)/)
+  assert.match(rules('.tab-select'), /background:\s*transparent/)
+  assert.match(rules('.tab-select'), /cursor:\s*grab/)
+  assert.match(rules('.tab-select'), /-webkit-app-region:\s*no-drag/)
+  assert.match(rules('.tab-select:focus-visible'), /outline-offset:\s*-3px/)
+  assert.match(rules('.tab-close'), /flex:\s*0\s+0\s+24px/)
+  assert.match(rules('.tab-close'), /width:\s*24px/)
+  assert.match(rules('.tab-close'), /height:\s*24px/)
+  assert.doesNotMatch(rules('.tab-close'), /display:\s*none|opacity:\s*0(?:;|\s*$)/)
+  assert.match(rules('.tab-close:hover, .tab-close:focus-visible'), /background:/)
 })
 
 test('long tab and SFTP titles truncate without shrinking the pane close button', () => {
@@ -61,6 +82,7 @@ test('card styling preserves fixed drag ghosts, file overflow and the immediate 
   // 拖影同时具有两个类；组合选择器避免普通标签的新定位规则把它拉回文档流。
   assert.match(rules('.session-tab.tab-ghost'), /position:\s*fixed/)
   assert.match(rules('.session-tab.tab-ghost'), /pointer-events:\s*none/)
+  assert.match(rules('.session-tab.tab-ghost button'), /pointer-events:\s*none/)
   assert.match(rules('.file-columns'), /overflow-x:\s*auto/)
   assert.match(rules('.file-columns .file-pane'), /flex:\s*0\s+0\s+auto/)
   assert.match(rules('.file-pane .sftp-table, .file-pane .local-table'), /min-width:\s*760px/)

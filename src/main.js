@@ -33,9 +33,6 @@ const elements = {
   cancelProfileX: document.querySelector('#cancel-profile-x'),
   tabs: document.querySelector('#session-tabs'),
   sessionStatus: document.querySelector('#session-status'),
-  reconnect: document.querySelector('#reconnect-session'),
-  typeaheadToggle: document.querySelector('#toggle-typeahead'),
-  close: document.querySelector('#close-session'),
   emptyState: document.querySelector('#empty-state'),
   terminalStack: document.querySelector('#terminal-stack'),
   sftpPanel: document.querySelector('#sftp-panel'),
@@ -511,7 +508,7 @@ function createTerminalSession (sessionId, profile) {
     inputDisposable: null
   }
   // 预显只画在原光标处；真实按键仍经原 IPC 立即发送，控制器不拥有网络写入能力。
-  session.typeaheadEnabled = true
+  // 默认即时回显，不提供顶栏开关；提示符/输入不符合条件时仍由控制器安全回退。
   session.typeahead = new TerminalTypeahead(terminal, terminalMount, { username: profile.username, enabled: true })
   session.typeaheadDisposables = [
     terminal.onResize(() => session.typeahead.reset()),
@@ -1514,24 +1511,59 @@ async function submitRemoteCopy (event) {
   }
 }
 
-/** 名称始终作为纯文本；协议标识独立缩排，不把长名称或重复的 SFTP 后缀挤进标签。 */
+/** 名称始终作为纯文本；SSH 不显示协议徽标，仅在可访问名称中保留类型区分。 */
 function setTabContent (tab, title, kind) {
   tab.dataset.kind = kind
   const label = document.createElement('span')
   label.className = 'tab-label'
   label.textContent = title
-  const protocol = document.createElement('span')
-  protocol.className = 'tab-kind'
-  protocol.textContent = kind === 'ssh' ? 'SSH' : 'SFTP'
-  protocol.setAttribute('aria-hidden', 'true')
-  tab.setAttribute('aria-label', `${title} · ${protocol.textContent}`)
-  tab.replaceChildren(label, protocol)
+  tab.setAttribute('aria-label', `${title} · ${kind === 'ssh' ? 'SSH' : 'SFTP'}`)
+  tab.replaceChildren(label)
+  if (kind !== 'ssh') {
+    const protocol = document.createElement('span')
+    protocol.className = 'tab-kind'
+    protocol.textContent = 'SFTP'
+    protocol.setAttribute('aria-hidden', 'true')
+    tab.append(protocol)
+  }
+}
+
+/** 选择和关闭为同级原生按钮；关闭后台标签不先激活它，也不产生嵌套按钮。 */
+function createSshTab (session) {
+  const tab = document.createElement('div')
+  tab.className = 'session-tab'
+  tab.dataset.kind = 'ssh'
+  tab.dataset.tabKey = `ssh:${session.id}`
+  tab.title = `${session.title} · SSH`
+  const select = createButton('', 'tab-select', () => activateSession(session.id))
+  setTabContent(select, session.title, 'ssh')
+  select.setAttribute('role', 'tab')
+  select.setAttribute('aria-selected', String(session.id === state.activeSessionId))
+  tab.classList.toggle('active', session.id === state.activeSessionId)
+  const dot = document.createElement('span')
+  dot.className = `tab-dot ${session.status === 'running' && !session.connected ? 'connecting' : session.status}`
+  dot.setAttribute('aria-hidden', 'true')
+  select.prepend(dot)
+  const close = createButton('×', 'tab-close', event => {
+    event.stopPropagation()
+    // 复用已有关闭流程和会话归属检查，不能按“当前选中项”误关另一台服务器。
+    removeSession(session, true).catch(error => notify(errorMessage(error), true))
+  }, `关闭 ${session.title} · SSH`)
+  close.title = `关闭 ${session.title}`
+  close.addEventListener('pointerdown', event => {
+    // 鼠标关闭不抢终端焦点、不进入排序；键盘仍可 Tab 到按钮并用 Enter/空格关闭。
+    event.preventDefault()
+    event.stopPropagation()
+  })
+  tab.append(select, close)
+  return tab
 }
 
 /** 渲染期间保留统一顺序；拖动时延后状态重绘，避免销毁指针捕获节点。 */
 function renderTabs () {
   if (tabPointer) return
   const scrollLeft = elements.tabs.scrollLeft
+  const closeFocused = Boolean(document.activeElement.closest?.('.tab-close'))
   let focusedKey = elements.tabs.contains(document.activeElement) ? document.activeElement.closest('[data-tab-key]')?.dataset.tabKey : null
   // 握手完成会更换占位 ID；键盘焦点仍属于同一台服务器，而不是新完成的标签。
   if (focusedKey?.startsWith('sftp:pending:')) {
@@ -1550,18 +1582,7 @@ function renderTabs () {
     elements.tabs.append(tab)
   }
   for (const session of state.sessions.values()) {
-    const tab = createButton(session.title, 'session-tab', () => activateSession(session.id))
-    tab.title = `${session.title} · SSH`
-    tab.dataset.tabKey = `ssh:${session.id}`
-    setTabContent(tab, session.title, 'ssh')
-    tab.setAttribute('role', 'tab')
-    tab.setAttribute('aria-selected', String(session.id === state.activeSessionId))
-    tab.classList.toggle('active', session.id === state.activeSessionId)
-    const dot = document.createElement('span')
-    dot.className = `tab-dot ${session.status === 'running' && !session.connected ? 'connecting' : session.status}`
-    dot.setAttribute('aria-hidden', 'true')
-    tab.prepend(dot)
-    elements.tabs.append(tab)
+    elements.tabs.append(createSshTab(session))
   }
   for (const connection of state.sftpConnections.values()) {
     const tab = createButton(connection.title, 'session-tab sftp-tab', () => activateSftp(connection.connectionId))
@@ -1586,7 +1607,11 @@ function renderTabs () {
   for (const key of tabOrder) elements.tabs.append(nodes.get(key))
   elements.tabs.scrollLeft = scrollLeft
   // 只恢复原本位于标签栏的焦点，后台状态刷新不能抢终端输入或改变横向位置。
-  if (focusedKey) nodes.get(focusedKey)?.focus({ preventScroll: true })
+  if (focusedKey) {
+    const tab = nodes.get(focusedKey)
+    const target = tab?.querySelector(closeFocused ? '.tab-close' : '.tab-select') ?? tab
+    target?.focus({ preventScroll: true })
+  }
   syncTabScrollControls()
 }
 
@@ -1691,13 +1716,6 @@ function syncWorkspaceState () {
     // 文件工作台轻移入场；SSH 仍仅淡入，不能给终端输入叠加位移或延迟。
     animateSurface(view, state.sftpActive ? 'enter' : 'settle')
   }
-  elements.reconnect.disabled = !session
-  elements.close.disabled = !hasView
-  elements.close.classList.toggle('hidden', !hasView)
-  elements.reconnect.classList.toggle('hidden', !session)
-  elements.typeaheadToggle.classList.toggle('hidden', !session)
-  elements.typeaheadToggle.disabled = !session?.connected || session.status !== 'running'
-  elements.typeaheadToggle.setAttribute('aria-pressed', String(Boolean(session?.typeaheadEnabled)))
 
   if (state.sftpActive && state.sftp) {
     elements.sessionStatus.textContent = state.sftp.status === 'ready' ? 'SFTP 已连接' : state.sftp.status === 'failed' ? 'SFTP 连接失败' : 'SFTP 连接中'
@@ -1752,26 +1770,6 @@ function handleSessionEvent (payload) {
   }
   renderTabs()
   syncWorkspaceState()
-}
-
-/** 重连原位替换标签；创建失败保留旧终端，等待期间用户的切换或关闭优先。 */
-async function reconnectActiveSession () {
-  const session = state.sessions.get(state.activeSessionId)
-  if (!session) return
-  // 先建立替代终端但不激活，避免启动失败就丢失旧终端内容。
-  const replacementId = await connectProfile(session.profileId, { activate: false })
-  const replacement = state.sessions.get(replacementId)
-  if (!replacement) return
-  if (state.sessions.get(session.id) !== session) {
-    // 用户已关闭原标签，晚到的新 PTY 也必须释放，不能重新出现。
-    await removeSession(replacement, true)
-    return
-  }
-  const oldKey = `ssh:${session.id}`
-  const newKey = `ssh:${replacementId}`
-  tabOrder = tabOrder.filter(key => key !== newKey).map(key => key === oldKey ? newKey : key)
-  if (!state.sftpActive && state.activeSessionId === session.id) activateSession(replacementId)
-  await removeSession(session, true)
 }
 
 /** 关闭立即更新界面；只替换当前标签，原生进程稍后退出不能抢回用户的新选择。 */
@@ -1833,7 +1831,7 @@ function handleAppAction (action) {
   if (document.querySelector('dialog[open]')) return notify('请先完成或取消当前对话框，再关闭连接')
   if (state.sftpActive && !state.sftp) return notify('当前是本机文件，请先选择要关闭的服务器标签')
   if (!state.sftpActive && !state.sessions.has(state.activeSessionId)) return
-  // 与工具栏共用忙碌保护和归属检查，不在快捷键路径另写一套关闭逻辑。
+  // 与标签及文件栏的关闭入口共用忙碌保护和归属检查，不在快捷键路径另写一套逻辑。
   closeActiveSession().catch(error => notify(errorMessage(error), true))
 }
 
@@ -1931,8 +1929,8 @@ window.addEventListener('drop', preventFileDropNavigation, { capture: true })
 window.addEventListener('drop', clearFileDragFeedback, { capture: true })
 window.addEventListener('dragend', clearFileDragFeedback)
 window.addEventListener('blur', clearFileDragFeedback)
-elements.reconnect.addEventListener('click', () => reconnectActiveSession())
 elements.tabs.addEventListener('pointerdown', event => {
+  if (event.target.closest('.tab-close')) return
   const tab = event.target.closest('.session-tab')
   if (!tab || event.button !== 0 || !event.isPrimary || tabPointer) return
   tabPointer = { key: tab.dataset.tabKey, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, moved: false, originalOrder: tabOrder.slice() }
@@ -1952,6 +1950,8 @@ window.addEventListener('pointermove', event => {
       drag.ghost = source.cloneNode(true)
       drag.ghost.classList.add('tab-ghost')
       drag.ghost.setAttribute('aria-hidden', 'true')
+      // 拖影包含选择/关闭按钮但只负责绘制，不能参与焦点导航或触发任何操作。
+      drag.ghost.inert = true
       drag.ghost.tabIndex = -1
       drag.ghost.style.left = `${rect.left}px`
       drag.ghost.style.top = `${rect.top}px`
@@ -1989,15 +1989,6 @@ elements.tabs.addEventListener('click', event => {
     event.stopImmediatePropagation()
   }
 }, true)
-elements.close.addEventListener('click', () => closeActiveSession())
-elements.typeaheadToggle.addEventListener('click', () => {
-  const session = !state.sftpActive && state.sessions.get(state.activeSessionId)
-  if (!session) return
-  session.typeaheadEnabled = !session.typeaheadEnabled
-  session.typeahead.setEnabled(session.typeaheadEnabled)
-  syncWorkspaceState()
-  session.terminal.focus()
-})
 folderForm.addEventListener('submit', submitSftpDirectory)
 document.querySelector('#folder-cancel').addEventListener('click', () => folderDialog.close())
 document.querySelector('#folder-cancel-x').addEventListener('click', () => folderDialog.close())

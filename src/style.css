@@ -93,14 +93,21 @@ input::placeholder { color: #8594a8; }
 .session-tabs { position: relative; }
 /* 克隆拖影仍带 session-tab 类，必须优先于普通标签的相对定位。 */
 .session-tab.tab-ghost { position: fixed; z-index: 1000; pointer-events: none; margin: 0; background: #30483f !important; color: #d5eee5; border: 1px solid #84bda8; box-shadow: 0 8px 20px #0005; will-change: transform; }
+.session-tab.tab-ghost button { pointer-events: none; }
 .session-tabs:empty::before { content: '工作空间'; color: var(--muted); font-size: 13px; }
 .session-tab { position: relative; display: flex; flex-shrink: 0; align-items: center; gap: 9px; height: 38px; min-width: 100px; max-width: 216px; padding: 0 12px; border: 1px solid #35424f; border-radius: 10px; color: #b5c2d1; background: #202c37; font-size: 12px; }
+/* 选择和关闭是同级按钮；长名称只压缩选择区，关闭入口始终留在标签内。 */
+.session-tab[data-kind="ssh"] { gap: 2px; padding: 0 6px 0 0; -webkit-app-region: no-drag; }
+.tab-select { display: flex; flex: 1; align-items: center; gap: 9px; min-width: 0; height: 100%; padding: 0 0 0 12px; border: 0; border-radius: 9px; color: inherit; background: transparent; text-align: left; cursor: grab; touch-action: none; -webkit-app-region: no-drag; }
+.tab-select:focus-visible { outline-offset: -3px; }
+.tab-close { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; color: #91a3b5; background: transparent; font-size: 18px; line-height: 1; }
+.tab-close:hover, .tab-close:focus-visible { color: #eef8ff; background: #ffffff16; }
 .tab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-kind { flex-shrink: 0; margin-left: auto; padding: 2px 4px; border-radius: 4px; color: #a0b1c3; background: #ffffff06; font: 500 9px/1.4 "SFMono-Regular", Menlo, monospace; letter-spacing: .03em; }
 .session-tab:hover { color: #e5eef6; border-color: #5b7181; background: #2a3945; }
 .session-tab { transition: background .18s ease, border-color .18s ease, color .18s ease; }
 .session-tab { cursor: grab; user-select: none; touch-action: none; }
-.session-tabs.sorting, .session-tabs.sorting .session-tab { cursor: grabbing; }
+.session-tabs.sorting, .session-tabs.sorting .session-tab, .session-tabs.sorting .tab-select { cursor: grabbing; }
 .session-tab.tab-dragging { opacity: .2; outline: 1px dashed var(--accent); outline-offset: -1px; }
 .session-tab.active { border-color: #638c7f; color: #e4fff4; background: linear-gradient(140deg, #345247, #263d38); box-shadow: inset 0 1px 0 #d6ffee14, 0 2px 6px #0002; }
 .session-tab.active::after { content: ''; position: absolute; left: 16px; right: 16px; bottom: -1px; height: 2px; border-radius: 2px; background: #a0e9d1; }
@@ -112,10 +119,6 @@ input::placeholder { color: #8594a8; }
 .status-pill { max-width: 140px; overflow: hidden; text-overflow: ellipsis; padding: 5px 8px; border: 1px solid #34404d; border-radius: 6px; color: var(--muted); background: #ffffff04; font-size: 11px; white-space: nowrap; }
 .status-pill.running { color: var(--accent); border-color: #395b50; background: #253c322e; }
 .status-pill.exited { color: #ed9eaa; border-color: #663f4c; }
-.session-action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; }
-.session-action svg { width: 15px; height: 15px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.session-actions .session-action.danger { border-color: transparent; background: transparent; color: #a5b1c1; }
-.session-action.danger:hover:not(:disabled) { color: #ffc0c6; border-color: #663f4c; background: #392b34; }
 .ghost-button, .primary-button { min-height: 34px; padding: 7px 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .ghost-button { border: 1px solid #3a4858; background: #222e3c; }
 .ghost-button:hover:not(:disabled) { border-color: #65758b; background: #2a3645; }
@@ -353,7 +356,6 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .terminal-typeahead { color: #dbe5f5; background: #11161e; transition: none !important; animation: none !important; }
 .terminal-typeahead[hidden] { display: none; }
 .terminal-typeahead-caret { position: absolute; top: 0; width: 0; height: 100%; border-left: 1px solid #68e0ba; }
-#toggle-typeahead[aria-pressed="true"] { color: var(--accent); border-color: #527f6d; background: #22382e; }
 .connection-card { width: min(640px, 90%); margin: 9vh auto 0; padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: #1a2330; }
 .connection-identity { display: flex; align-items: center; gap: 18px; }
 .connection-identity > div { min-width: 0; }
@@ -378,8 +380,6 @@ fieldset { margin: 0; padding: 0; border: 0; }
   .app-shell { grid-template-columns: 260px minmax(0, 1fr); }
   .topbar { gap: 8px; padding-right: 12px; padding-left: 12px; }
   .session-actions { gap: 5px; padding-left: 8px; }
-  .session-actions .action-label { display: none; }
-  .session-actions .session-action { width: 32px; padding: 0; }
   .session-actions .status-pill { max-width: 112px; font-size: 10px; }
   .file-workspace-tools > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .workspace-shortcuts { display: none; }
