@@ -162,6 +162,8 @@ function tabsHarness (focusedKey) {
     notify: message => assert.fail(message),
     errorMessage: error => error.message,
     openFileWorkspace () {},
+    closeFileWorkspace: async () => closed.push({ id: 'files:local' }),
+    closeSftp: async (connection, options) => closed.push({ id: connection.connectionId, force: options.force }),
     bindSftpDropTarget () {},
     tabScrollState: () => ({ canScrollLeft: false, canScrollRight: false })
   })
@@ -172,7 +174,7 @@ function tabsHarness (focusedKey) {
 test('tab repaint preserves keyboard focus and horizontal position when a pending SFTP ID changes', () => {
   const h = tabsHarness('sftp:pending:r')
   h.context.renderTabs()
-  assert.equal(h.document.activeElement.dataset.tabKey, 'sftp:remote-r')
+  assert.equal(h.document.activeElement.closest('[data-tab-key]').dataset.tabKey, 'sftp:remote-r')
   assert.deepEqual(h.focusCalls, [{ key: 'sftp:remote-r', preventScroll: true }])
   assert.equal(h.tabs.scrollLeft, 420)
   assert.equal(h.state.activeSessionId, 'a')
@@ -203,11 +205,11 @@ test('SSH has sibling select/close buttons instead of a visible badge; names rem
   assert.equal(ssh.querySelector('.tab-kind'), null)
   assert.equal(close.textContent, '×')
   assert.equal(close['aria-label'], `关闭 ${name} · SSH`)
-  assert.equal(remote.children.find(node => node.className === 'tab-label').textContent, 'Remote')
-  assert.equal(remote.children.find(node => node.className === 'tab-kind').textContent, 'SFTP')
+  assert.equal(remote.querySelector('.tab-label').textContent, 'Remote')
+  assert.equal(remote.querySelector('.tab-kind').textContent, 'SFTP')
   assert.equal(remote.dataset.kind, 'sftp')
   assert.equal(select['aria-label'], `${name} · SSH`)
-  assert.equal(remote['aria-label'], 'Remote · SFTP')
+  assert.equal(remote.querySelector('.tab-select')['aria-label'], 'Remote · SFTP')
 })
 
 test('clicking an SSH close icon stops pointer sorting and closes that session without selecting it', () => {
@@ -235,6 +237,25 @@ test('background tab repaint restores the same close control, not a selection or
   assert.notEqual(before, after)
   assert.equal(h.document.activeElement, after)
   assert.deepEqual(h.activated, [])
+})
+
+test('local and remote SFTP tabs have independent close buttons that never select the tab first', () => {
+  const h = tabsHarness(null)
+  h.context.renderTabs()
+  const local = h.tabs.children.find(tab => tab.dataset.tabKey === 'files:local')
+  const remote = h.tabs.children.find(tab => tab.dataset.tabKey === 'sftp:remote-r')
+  for (const tab of [local, remote]) {
+    const select = tab.querySelector('.tab-select')
+    const close = tab.querySelector('.tab-close')
+    assert.equal(tab.tagName, 'div')
+    assert.equal(close.tagName, 'button')
+    assert.equal(select.contains(close), false)
+    assert.equal(close.textContent, '×')
+    close.events.click({ stopPropagation () {} })
+  }
+  assert.deepEqual(h.closed, [{ id: 'files:local' }, { id: 'remote-r', force: true }])
+  assert.deepEqual(h.activated, [])
+  assert.equal(h.state.activeSessionId, 'a')
 })
 
 test('SSH enables inline echo by default without any toolbar toggle or replay path', () => {

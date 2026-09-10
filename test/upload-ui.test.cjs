@@ -49,3 +49,51 @@ test('dismissing the native chooser hides the preparing indicator and releases t
   assert.equal(hidden, true)
   assert.equal(connection.busy, false)
 })
+
+test('a busy file pane always keeps its force-close X enabled', () => {
+  const node = () => ({ disabled: false, classList: { toggle () {} } })
+  const ui = {
+    pane: { setAttribute () {} },
+    footer: node(),
+    operation: {},
+    parent: node(),
+    refresh: node(),
+    mkdir: node(),
+    upload: node(),
+    pathForm: { querySelector: node },
+    close: node(),
+    list: { querySelectorAll: () => [] },
+    path: node(),
+    cancelUpload: node()
+  }
+  const connection = { status: 'ready', ui }
+  const context = vm.createContext({ state: { sftp: connection } })
+  vm.runInContext(source.slice(source.indexOf('function setSftpBusy ('), source.indexOf('/** 终止请求只改变')), context)
+  context.setSftpBusy(true, '传输中', connection)
+  assert.equal(ui.upload.disabled, true)
+  assert.equal(ui.close.disabled, false)
+})
+
+test('closing during an upload suppresses late result refreshes and expected disconnect errors', async () => {
+  for (const failure of [false, true]) {
+    let finish
+    const connection = { busy: false, connectionId: 'fixture', path: '/' }
+    const notices = []
+    const context = vm.createContext({
+      api: { sftp: { upload: () => new Promise((resolve, reject) => { finish = failure ? reject : resolve }) } },
+      setSftpBusy: busy => { connection.busy = busy },
+      renderSftpFiles () {},
+      refreshSftpAfterOperation: () => assert.fail('closed connection cannot refresh'),
+      reportUploadResults: () => assert.fail('closed connection cannot report success'),
+      notify: message => notices.push(message),
+      errorMessage: error => error.message
+    })
+    vm.runInContext(source.slice(source.indexOf('async function uploadSftpFile ('), source.indexOf('async function downloadSftpFile (')), context)
+    const uploading = context.uploadSftpFile(connection)
+    connection.closed = true
+    finish(failure ? new Error('connection closed') : { canceled: false, results: [] })
+    await uploading
+    assert.equal(connection.busy, false)
+    assert.deepEqual(notices, [])
+  }
+})

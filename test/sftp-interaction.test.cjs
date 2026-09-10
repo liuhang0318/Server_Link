@@ -78,3 +78,18 @@ test('a closed pending pane never reappears and late native success is released'
   assert.equal(h.state.sftpConnections.size, 0)
   assert.deepEqual(h.closed, ['late-success'])
 })
+
+test('late success cannot replace a new placeholder that reuses the same pending profile ID', async () => {
+  const h = harness()
+  const old = h.context.prepareSftp('a')
+  const connecting = h.context.connectSftp('a', { connection: old })
+  await h.context.closeSftp(old, { force: true })
+  const replacement = h.context.prepareSftp('a')
+  h.state.sftp = replacement
+  h.pending.get('a')({ connectionId: 'old-success', path: '/old', entries: [] })
+  await connecting
+  assert.equal(h.state.sftpConnections.get('pending:a'), replacement)
+  assert.equal(replacement.status, 'queued')
+  assert.equal(h.state.sftp, replacement)
+  assert.deepEqual(h.closed, ['old-success'])
+})

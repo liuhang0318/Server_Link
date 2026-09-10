@@ -47,10 +47,10 @@ test('compact toolbar keeps named navigation and status without redundant sessio
   assert.doesNotMatch(css, /#toggle-typeahead|\.session-action(?!s)\b|\.action-label\b/)
 })
 
-test('SSH tab selection and close affordance remain compact and keyboard-visible', () => {
+test('all tab selection and close affordances remain compact and keyboard-visible', () => {
   assert.match(rules('.session-tab'), /height:\s*38px/)
   assert.match(rules('.session-tab'), /max-width:\s*216px/)
-  assert.match(rules('.session-tab[data-kind="ssh"]'), /-webkit-app-region:\s*no-drag/)
+  assert.match(rules('.session-tab[data-kind]'), /-webkit-app-region:\s*no-drag/)
   assert.match(rules('.tab-select'), /min-width:\s*0/)
   assert.match(rules('.tab-select'), /flex:\s*1(?:;|\s*$)/)
   assert.match(rules('.tab-select'), /background:\s*transparent/)
@@ -62,6 +62,12 @@ test('SSH tab selection and close affordance remain compact and keyboard-visible
   assert.match(rules('.tab-close'), /height:\s*24px/)
   assert.doesNotMatch(rules('.tab-close'), /display:\s*none|opacity:\s*0(?:;|\s*$)/)
   assert.match(rules('.tab-close:hover, .tab-close:focus-visible'), /background:/)
+})
+
+test('the large server-plus icon is a real named button using the same server picker', () => {
+  assert.match(html, /<button id="empty-server-icon"[^>]*type="button"[^>]*aria-label="选择要连接的服务器"/)
+  const source = readFileSync(path.join(__dirname, '../src/main.js'), 'utf8')
+  assert.match(source, /querySelector\('#empty-server-icon'\)\.addEventListener\('click', showServerPicker\)/)
 })
 
 test('long tab and SFTP titles truncate without shrinking the pane close button', () => {
