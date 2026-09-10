@@ -376,6 +376,12 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .file-pane .sftp-table th, .file-pane .local-table th { height: 40px; padding-top: 8px; padding-bottom: 8px; }
 .file-pane .sftp-table td { height: 43px; border-bottom-color: #ffffff09; }
 .ssh-terminal-mount { position: absolute; inset: 0; }
+/* 卡片以外仍可滚动和选择终端输出；只有中央卡片接收点击，在线时完全隐藏。 */
+.terminal-reconnect { position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; pointer-events: none; }
+.terminal-reconnect-card { max-width: min(340px, 90%); padding: 24px 28px; border: 1px solid #476457; border-radius: 14px; background: #1b2a26f5; box-shadow: 0 14px 44px #0005; text-align: center; pointer-events: auto; animation: dialog-enter .18s var(--ease-out); }
+.terminal-reconnect-title { margin: 0; color: #dfede8; font-size: 17px; font-weight: 600; }
+.terminal-reconnect-note { margin: 10px 0 20px; color: #a7bcb5; font-size: 12px; line-height: 1.7; }
+.terminal-reconnect-card .primary-button { min-width: 132px; min-height: 38px; }
 /* 原位预显层不接管焦点、不改变终端行高；不能加过渡，否则打字会再次出现视觉延迟。 */
 .terminal-typeahead { color: #dbe5f5; background: #11161e; transition: none !important; animation: none !important; }
 .terminal-typeahead[hidden] { display: none; }

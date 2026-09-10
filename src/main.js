@@ -706,6 +706,7 @@ async function saveProfile (event) {
   }
 }
 
+/** 每个 SSH 会话拥有独立终端和断线控件；重连只由明确点击触发，不自动重发输入。 */
 function createTerminalSession (sessionId, profile) {
   const container = document.createElement('div')
   container.className = 'terminal-view'
@@ -776,7 +777,20 @@ function createTerminalSession (sessionId, profile) {
   })
   actions.append(logsButton, createButton('关闭连接', 'ghost-button danger', () => removeSession(session, true)))
   card.append(identity, progressRail, progressLabel, actions, logView)
-  container.append(card, terminalMount)
+  const reconnectPanel = document.createElement('div')
+  reconnectPanel.className = 'terminal-reconnect hidden'
+  const reconnectCard = document.createElement('div')
+  reconnectCard.className = 'terminal-reconnect-card'
+  const reconnectTitle = document.createElement('p')
+  reconnectTitle.className = 'terminal-reconnect-title'
+  reconnectTitle.setAttribute('role', 'status')
+  const reconnectNote = document.createElement('p')
+  reconnectNote.className = 'terminal-reconnect-note'
+  reconnectNote.textContent = '可查看断开前的输出，或重新建立连接'
+  const reconnectButton = createButton('重新连接', 'primary-button', () => reconnectSession(session), `重新连接 ${profile.name}`)
+  reconnectCard.append(reconnectTitle, reconnectNote, reconnectButton)
+  reconnectPanel.append(reconnectCard)
+  container.append(card, terminalMount, reconnectPanel)
 
   const session = {
     id: sessionId,
@@ -792,6 +806,10 @@ function createTerminalSession (sessionId, profile) {
     progressLabel,
     logView,
     logsButton,
+    reconnectPanel,
+    reconnectTitle,
+    reconnectButton,
+    reconnecting: false,
     phase: 'connecting',
     connected: false,
     showLogs: false,
@@ -811,6 +829,8 @@ function createTerminalSession (sessionId, profile) {
     terminal.buffer.onBufferChange(() => session.typeahead.reset())
   ]
   session.inputDisposable = terminal.onData(data => {
+    // 断开期间的按键不发送、不缓存；用户确认重连后仍从全新会话开始。
+    if (session.status !== 'running') return
     // 预显是显示优化，任何绘制异常都不能阻止真实按键发送。
     try {
       if (session.connected && session.status === 'running') session.typeahead.input(data)
@@ -831,18 +851,24 @@ function createTerminalSession (sessionId, profile) {
   return session
 }
 
-/** 进度来自本机 SSH 诊断；PTY 出现提示时显示交互区，确保口令/指纹确认不被遮挡。 */
+/** 握手提示不遮挡交互；仅最终断开后显示居中的重连入口，并保留可查看的终端输出。 */
 function syncTerminalPresentation (session) {
+  const exited = session.status === 'exited'
   const labels = { connecting: '正在连接服务器…', retrying: `网络暂时异常，准备第 ${session.retryAttempt || 1}/2 次重试…`, verifying: '正在验证服务器身份…', authenticating: '正在验证登录身份…', connected: '连接成功', failed: '连接失败，请查看日志或重新连接' }
   session.progressLabel.textContent = session.status === 'exited' ? '连接已结束，请查看日志' : labels[session.phase]
   session.progressRail.classList.toggle('failed', session.phase === 'failed' || session.status === 'exited')
-  session.card.classList.toggle('hidden', session.connected)
+  session.card.classList.toggle('hidden', session.connected || exited)
+  session.reconnectPanel.classList.toggle('hidden', !exited)
+  session.reconnectPanel.setAttribute('aria-busy', String(session.reconnecting))
+  session.reconnectTitle.textContent = session.connected ? '连接已断开' : '连接未成功'
+  session.reconnectButton.disabled = session.reconnecting
+  session.reconnectButton.textContent = session.reconnecting ? '正在重连…' : '重新连接'
   session.logView.classList.toggle('hidden', !session.showLogs)
   session.logView.textContent = session.logs || '正在启动系统 SSH，等待诊断信息…'
   session.logsButton.textContent = session.showLogs ? '收起日志' : '显示日志'
-  const visible = session.connected || session.showLogs
+  const visible = session.connected || session.showLogs || exited
   const wasHidden = session.terminalMount.classList.contains('hidden')
-  session.container.classList.toggle('connection-logs-open', !session.connected && session.showLogs)
+  session.container.classList.toggle('connection-logs-open', !exited && !session.connected && session.showLogs)
   session.terminalMount.classList.toggle('hidden', !visible)
   if (visible && state.activeSessionId === session.id && !state.sftpActive) {
     if (!session.opened) {
@@ -850,12 +876,49 @@ function syncTerminalPresentation (session) {
       session.terminal.open(session.terminalMount)
       session.opened = true
     }
-    if (wasHidden) session.terminal.focus()
+    if (wasHidden && !exited) session.terminal.focus()
     window.requestAnimationFrame(() => {
       if (state.activeSessionId !== session.id || state.sftpActive || session.terminalMount.classList.contains('hidden')) return
       session.fitAddon.fit()
       api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
     })
+  }
+}
+
+/** 只响应已断开标签的手动重连；原位替换，不复制历史输入，用户关闭或切走始终优先。 */
+async function reconnectSession (session) {
+  if (state.sessions.get(session.id) !== session || session.status !== 'exited' || session.reconnecting) return
+  if (!profileById(session.profileId)) return notify('服务器配置已删除，请重新添加后连接', true)
+  if (state.connectingProfiles.has(session.profileId)) return notify('此服务器正在建立连接，请稍后重试')
+  session.reconnecting = true
+  syncTerminalPresentation(session)
+  try {
+    // 只建立新的 SSH 会话，旧终端保留到新会话创建成功；失败时仍可查看输出并再次尝试。
+    const replacementId = await connectProfile(session.profileId, { activate: false })
+    const replacement = state.sessions.get(replacementId)
+    if (!replacement) return
+    if (state.sessions.get(session.id) !== session) {
+      // 创建 IPC 返回前用户可能点了 ×；释放晚到进程，不能复活已关闭的标签。
+      await removeSession(replacement, true)
+      return
+    }
+    const oldKey = `ssh:${session.id}`
+    const newKey = `ssh:${replacementId}`
+    tabOrder = tabOrder.filter(key => key !== newKey).map(key => key === oldKey ? newKey : key)
+    if (tabPointer) {
+      // 手势尚未结束时同步其身份和撤销快照；Escape 不得恢复旧 ID，把新标签挤到末尾。
+      tabPointer.originalOrder = tabPointer.originalOrder.filter(key => key !== newKey).map(key => key === oldKey ? newKey : key)
+      if (tabPointer.key === oldKey) tabPointer.key = newKey
+      const tab = elements.tabs.querySelector(`[data-tab-key="${oldKey}"]`)
+      if (tab) tab.dataset.tabKey = newKey
+    }
+    if (!state.sftpActive && state.activeSessionId === session.id) activateSession(replacementId)
+    await removeSession(session, false)
+  } catch (error) {
+    if (state.sessions.get(session.id) === session) notify(errorMessage(error), true)
+  } finally {
+    session.reconnecting = false
+    if (state.sessions.get(session.id) === session) syncTerminalPresentation(session)
   }
 }
 

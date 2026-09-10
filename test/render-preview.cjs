@@ -11,6 +11,8 @@ const bridge = `
   let progressListener;
   let sessionCount = 0;
   const sessionPrompts = new Map();
+  const attemptedProfiles = new Set();
+  const disconnectOnce = new URLSearchParams(location.search).has('disconnect-once');
   const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
   const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
   // ?organize 与原生 --organize 使用相同名称场景；仅替换静态假配置。
@@ -101,10 +103,20 @@ const bridge = `
       start: async profileId => {
         const sessionId = 'preview-' + (++sessionCount);
         const prompt = '[' + (profiles.find(item => item.id === profileId)?.username || 'developer') + '@preview ~]$ ';
+        const firstAttempt = !attemptedProfiles.has(profileId);
+        attemptedProfiles.add(profileId);
         sessionPrompts.set(sessionId, prompt);
-        setTimeout(() => listener({ type: 'progress', sessionId, phase: 'verifying', logs: 'Connection established.\\nChecking server host key.' }), 100);
-        setTimeout(() => listener({ type: 'progress', sessionId, phase: 'connected', logs: 'Authenticated to loopback using publickey.' }), 4000);
-        setTimeout(() => listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\n' + prompt }), 4100);
+        // 主动关闭后的延迟事件也必须失效，不能把旧标签重新变成已连接。
+        setTimeout(() => { if (sessionPrompts.has(sessionId)) listener({ type: 'progress', sessionId, phase: 'verifying', logs: 'Connection established.\\nChecking server host key.' }); }, 100);
+        setTimeout(() => { if (sessionPrompts.has(sessionId)) listener({ type: 'progress', sessionId, phase: 'connected', logs: 'Authenticated to loopback using publickey.' }); }, 4000);
+        setTimeout(() => { if (sessionPrompts.has(sessionId)) listener({ type: 'data', sessionId, data: '\\x1b[32mSERVERLINK_RENDER_READY 中文\\x1b[0m\\r\\n' + prompt }); }, 4100);
+        if (disconnectOnce && firstAttempt) {
+          // 每台配置仅在首次提示符显示两秒后断线；后续重连不再断开或重复输出。
+          setTimeout(() => {
+            if (!sessionPrompts.delete(sessionId)) return;
+            listener({ type: 'exit', sessionId, exitCode: 255 });
+          }, 6100);
+        }
         return { sessionId };
       },
       // ?slow-echo 模拟网络延迟，验证原位预显到真实回显的交接；回车只生成空提示符，绝不执行命令。

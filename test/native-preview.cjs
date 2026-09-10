@@ -7,6 +7,10 @@ const os = require('node:os')
 const path = require('node:path')
 const { randomUUID } = require('node:crypto')
 
+const disconnectOnce = process.argv.includes('--disconnect-once')
+const failOnce = process.argv.includes('--fail-once')
+if (disconnectOnce && failOnce) throw new Error('请分别使用 --disconnect-once 或 --fail-once 验收断线与首次失败')
+
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'serverlink-native-preview-'))
 app.setPath('userData', temporaryRoot)
 for (const key of ['sessionData', 'logs']) {
@@ -98,16 +102,36 @@ class ProfileStore {
 
 /** 模拟终端生命周期；write 仅回显，绝不创建 PTY、调用 shell 或建立 SSH。 */
 class SessionManager {
-  constructor () { this.sessions = new Map() }
+  constructor () { this.sessions = new Map(); this.attemptedProfiles = new Set() }
   async init () {}
 
+  /** 首次断线/失败只消费当前配置的一次机会，重连后保持在线以验收恢复状态。 */
   start (ownerId, profile, emit) {
     const sessionId = randomUUID()
     const prompt = `[${profile.username}@preview ~]$ `
+    const firstAttempt = !this.attemptedProfiles.has(profile.id)
+    this.attemptedProfiles.add(profile.id)
     const timer = setTimeout(() => {
-      if (!this.sessions.has(sessionId)) return
+      const record = this.sessions.get(sessionId)
+      if (!record) return
+      if (failOnce && firstAttempt) {
+        // 不发 connected 或提示符，复现握手失败；删除后延迟回显也不能继续写入。
+        this.sessions.delete(sessionId)
+        emit({ type: 'exit', sessionId, exitCode: 255 })
+        console.log(`SERVERLINK_NATIVE_PREVIEW_SESSION_FAILED ${sessionId}`)
+        return
+      }
       emit({ type: 'progress', sessionId, phase: 'connected', logs: 'Static fixture: no network connection.' })
       emit({ type: 'data', sessionId, data: `\x1b[32m${profile.name} · 隔离演示，无远程连接\x1b[0m\r\n${prompt}` })
+      if (disconnectOnce && firstAttempt) {
+        // 提示符显示两秒后模拟远端断线；复用 timer 字段让主动关闭仍能撤销此事件。
+        record.timer = setTimeout(() => {
+          if (this.sessions.get(sessionId) !== record) return
+          this.sessions.delete(sessionId)
+          emit({ type: 'exit', sessionId, exitCode: 255 })
+          console.log(`SERVERLINK_NATIVE_PREVIEW_SESSION_DISCONNECTED ${sessionId}`)
+        }, 2000)
+      }
     }, 700)
     this.sessions.set(sessionId, { ownerId, emit, timer, prompt })
     emit({ type: 'progress', sessionId, phase: 'connecting', logs: 'Preparing static fixture.' })
