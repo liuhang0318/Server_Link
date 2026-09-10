@@ -152,6 +152,11 @@ function registerIpc () {
     assertMainFrame(event)
     return profileStore.update(id, input)
   })
+  ipcMain.handle('profiles:organize', (event, change) => {
+    // 拖动和批量分组仍属于持久化写操作，只允许应用主文档通过专用元数据白名单修改。
+    assertMainFrame(event)
+    return profileStore.organize(change)
+  })
   ipcMain.handle('profiles:remove', (event, id) => {
     assertMainFrame(event)
     return profileStore.remove(id)

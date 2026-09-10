@@ -4,7 +4,7 @@ import { version } from '../package.json'
 import '@xterm/xterm/css/xterm.css'
 import './style.css'
 import { moveTab, tabScrollState } from './tab-order.mjs'
-import { groupProfiles } from './profile-groups.mjs'
+import { groupProfiles, moveProfileOrder } from './profile-groups.mjs'
 import { connectBatch } from './connection-batch.mjs'
 import { filterFiles, refreshedSelection, selectFileRange, isUploadableEntry } from './file-browser.mjs'
 import { animateSurface } from './motion.mjs'
@@ -71,6 +71,13 @@ let tabDragFrame = null
 let suppressTabClickUntil = 0
 const expandedProfileGroups = new Set()
 const connectingGroups = new Set()
+const profileSelection = new Set()
+const profileDropTargets = new WeakMap()
+let managingProfiles = false
+let profileOrganizationSaving = false
+let profileDrag = null
+let profileDragFrame = null
+let profileGroupIds = []
 const uploadTargets = new Set()
 let localDirectory = null
 let localLoading = false
@@ -136,11 +143,262 @@ function createButton (text, className, action, label) {
   return button
 }
 
-/** 本地过滤配置，保持 SSH / SFTP 主操作常驻并显示当前工作连接。 */
-function renderProfiles () {
-  elements.profileList.replaceChildren()
+/** 组织方式也可搜索；过滤只影响展示，不从排序快照中丢弃隐藏服务器。 */
+function visibleProfiles () {
   const query = profileSearch.value.trim().toLocaleLowerCase()
-  const profiles = state.profiles.filter(profile => `${profile.name} ${profile.host} ${profile.username}`.toLocaleLowerCase().includes(query))
+  return state.profiles.filter(profile => `${profile.name} ${profile.host} ${profile.username} ${profile.group ?? ''}`.toLocaleLowerCase().includes(query))
+}
+
+/** 原地更新管理控件，勾选时不重建卡片，保留键盘焦点和拖动起点。 */
+function syncProfileSelection () {
+  const visible = visibleProfiles()
+  const ids = new Set(state.profiles.map(profile => profile.id))
+  for (const id of profileSelection) if (!ids.has(id)) profileSelection.delete(id)
+  document.querySelector('#manage-profiles').setAttribute('aria-pressed', String(managingProfiles))
+  document.querySelector('#manage-profiles').textContent = managingProfiles ? '完成' : '管理'
+  document.querySelector('#profile-selection-tools').classList.toggle('hidden', !managingProfiles)
+  document.querySelector('#profile-selection-count').textContent = `已选 ${profileSelection.size} 台`
+  document.querySelector('#assign-profile-group').disabled = !profileSelection.size || profileOrganizationSaving
+  document.querySelector('#connect-selected-profiles').disabled = !profileSelection.size || profileOrganizationSaving || connectingGroups.has('selection')
+  const selectVisible = document.querySelector('#profile-select-visible')
+  selectVisible.disabled = !visible.length || profileOrganizationSaving
+  selectVisible.textContent = visible.length && visible.every(profile => profileSelection.has(profile.id)) ? '取消当前选择' : '全选当前列表'
+  for (const item of elements.profileList.querySelectorAll('.profile-item')) {
+    const selected = profileSelection.has(item.dataset.profileId)
+    item.classList.toggle('profile-checked', selected)
+    const checkbox = item.querySelector('.profile-check')
+    if (checkbox) checkbox.checked = selected
+  }
+  const visibleIds = new Set(visible.map(profile => profile.id))
+  const groups = groupProfiles(state.profiles)
+  for (const checkbox of elements.profileList.querySelectorAll('[data-select-group]')) {
+    const members = groups.find(group => group.key === checkbox.dataset.selectGroup)?.profiles.filter(profile => visibleIds.has(profile.id)) ?? []
+    checkbox.checked = members.length > 0 && members.every(profile => profileSelection.has(profile.id))
+    checkbox.indeterminate = !checkbox.checked && members.some(profile => profileSelection.has(profile.id))
+  }
+}
+
+/** 每批最多 100 台；超过限制不留下部分选择，避免批量归组/连接的范围出乎预期。 */
+function selectProfiles (ids, selected) {
+  const next = new Set(profileSelection)
+  for (const id of ids) selected ? next.add(id) : next.delete(id)
+  if (next.size > 100) notify('一次最多选择 100 台服务器', true)
+  else {
+    profileSelection.clear()
+    for (const id of next) profileSelection.add(id)
+  }
+  syncProfileSelection()
+}
+
+/** 只提交组织元数据；主进程校验完整排序和归属，原子保存成功后才更新界面。 */
+async function saveProfileOrganization (change) {
+  if (profileOrganizationSaving) return false
+  profileOrganizationSaving = true
+  renderProfiles()
+  try {
+    state.profiles = await api.profiles.organize(change)
+    if (typeof change.group === 'string' && change.group) {
+      const group = groupProfiles(state.profiles).find(group => group.name.toLocaleLowerCase() === change.group.trim().toLocaleLowerCase())
+      if (group) expandedProfileGroups.add(group.key)
+    }
+    notify('服务器分组与顺序已保存')
+    return true
+  } catch (error) {
+    // 多窗口新增/删除可能让完整排序过期；读取最新列表供用户重试，不自动覆盖他的新改动。
+    state.profiles = await api.profiles.list().catch(() => state.profiles)
+    notify(errorMessage(error), true)
+    return false
+  } finally {
+    profileOrganizationSaving = false
+    renderProfiles()
+  }
+}
+
+/** 分组名称来自文本控件；已有组名仅作为建议，绝不拼入 HTML。 */
+function showProfileGroupDialog () {
+  if (!profileSelection.size || profileOrganizationSaving) return
+  profileGroupIds = state.profiles.filter(profile => profileSelection.has(profile.id)).map(profile => profile.id)
+  const groups = groupProfiles(state.profiles).filter(group => group.grouped)
+  const options = document.querySelector('#profile-group-options')
+  options.replaceChildren()
+  for (const group of groups) {
+    const option = document.createElement('option')
+    option.value = group.name
+    options.append(option)
+  }
+  document.querySelector('#profile-group-selection').textContent = `已选择 ${profileGroupIds.length} 台：${state.profiles.filter(profile => profileSelection.has(profile.id)).map(profile => profile.name).join('、')}`
+  document.querySelector('#profile-group-mode').value = 'manual'
+  document.querySelector('#profile-group-name').value = ''
+  document.querySelector('#profile-group-error').textContent = ''
+  syncProfileGroupMode()
+  document.querySelector('#profile-group-dialog').showModal()
+  document.querySelector('#profile-group-name').focus()
+}
+
+/** 恢复自动/独立显示不需要组名，隐藏控件同时退出必填校验。 */
+function syncProfileGroupMode () {
+  const manual = document.querySelector('#profile-group-mode').value === 'manual'
+  document.querySelector('#profile-group-name-row').classList.toggle('hidden', !manual)
+  document.querySelector('#profile-group-name').required = manual
+}
+
+/** 一次保存整个选择；失败保留弹窗及组名，用户可修正后重试。 */
+async function submitProfileGroup (event) {
+  event.preventDefault()
+  if (profileOrganizationSaving) return
+  const mode = document.querySelector('#profile-group-mode').value
+  const group = mode === 'auto' ? null : mode === 'none' ? '' : document.querySelector('#profile-group-name').value.trim()
+  const error = document.querySelector('#profile-group-error')
+  if (mode === 'manual' && !group) { error.textContent = '请输入分组名称'; return }
+  const button = document.querySelector('#profile-group-save')
+  button.disabled = true
+  error.textContent = ''
+  try {
+    // 使用完整展示序，首次手动归组时也保留原本的自动组内自然顺序。
+    const order = groupProfiles(state.profiles).flatMap(group => group.profiles.map(profile => profile.id))
+    if (await saveProfileOrganization({ ids: profileGroupIds, group, order })) document.querySelector('#profile-group-dialog').close()
+    else error.textContent = '保存失败，服务器列表已刷新，请重试或重新选择服务器。'
+  } finally {
+    button.disabled = false
+  }
+}
+
+/** 卡片跨组拖动继承落点的分组；拖动整个组只调整组块顺序，不改变任何成员归属。 */
+function profileDropChange (drag, group, targetId, after) {
+  if (drag.kind === 'group') {
+    if (group.profiles.some(profile => drag.ids.includes(profile.id))) return null
+    targetId = (after ? group.profiles.at(-1) : group.profiles[0]).id
+    return { order: moveProfileOrder(state.profiles, drag.ids, targetId, after) }
+  }
+  if (targetId && drag.ids.includes(targetId)) return null
+  if (!targetId) {
+    targetId = group.profiles.filter(profile => !drag.ids.includes(profile.id)).at(-1)?.id
+    after = true
+  }
+  if (!targetId) return null
+  const order = moveProfileOrder(state.profiles, drag.ids, targetId, after)
+  // 同组内只排序，不能悄悄把原来的名称自动分组固化为手动分组。
+  if (drag.ids.every(id => group.profiles.some(profile => profile.id === id))) return { order }
+  return { ids: drag.ids, group: group.grouped ? group.name : '', order }
+}
+
+/** 内部排序使用指针捕获，不进入系统文件拖放；多选仍只引用本窗口的服务器 ID。 */
+function createProfileDragHandle (ids, name, kind) {
+  const handle = createButton('⠿', 'profile-drag-handle', event => { event.preventDefault(); event.stopPropagation() }, `拖动排序 ${name}`)
+  handle.title = `拖动 ${name} 排序 · ⌥↑ / ⌥↓ 调整位置`
+  handle.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown')
+  // 保留把手的键盘焦点；忙碌时事件守卫拒绝移动，而不是销毁正在操作的焦点入口。
+  handle.setAttribute('aria-disabled', String(profileOrganizationSaving))
+  handle.addEventListener('pointerdown', event => {
+    if (profileOrganizationSaving || profileDrag || event.button !== 0 || !event.isPrimary) return
+    event.preventDefault()
+    event.stopPropagation()
+    const selected = kind === 'profile' && managingProfiles && profileSelection.has(ids[0]) ? [...profileSelection] : ids
+    profileDrag = { ids: selected, kind, name, handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, moved: false, target: null }
+    handle.focus({ preventScroll: true })
+    handle.setPointerCapture(event.pointerId)
+  })
+  handle.addEventListener('keydown', event => {
+    if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key) || profileOrganizationSaving || profileDrag) return
+    event.preventDefault()
+    const groups = groupProfiles(state.profiles)
+    const direction = event.key === 'ArrowDown' ? 1 : -1
+    let group
+    let target
+    if (kind === 'group') {
+      const index = groups.findIndex(group => group.profiles.some(profile => ids.includes(profile.id)))
+      group = groups[index + direction]
+    } else {
+      const profiles = groups.flatMap(group => group.profiles)
+      target = profiles[profiles.findIndex(profile => profile.id === ids[0]) + direction]
+      group = groups.find(group => group.profiles.includes(target))
+    }
+    if (!group) return
+    const change = profileDropChange({ ids, kind }, group, target?.id, direction > 0)
+    if (change) saveProfileOrganization(change)
+  })
+  return handle
+}
+
+/** 记录每个可见落点的归属，命中检测不从可伪造的拖放文本中解析分组或服务器。 */
+function bindProfileDropTarget (element, group, profileId = null) {
+  profileDropTargets.set(element, { group, profileId })
+}
+
+/** 小于 6px 的按下不算拖动；手势浮层只绘制名称，不改变卡片布局或已打开的终端。 */
+function moveProfileDrag (event) {
+  const drag = profileDrag
+  if (!drag || drag.pointerId !== event.pointerId) return
+  drag.x = event.clientX
+  drag.y = event.clientY
+  if (!drag.moved && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) >= 6) {
+    drag.moved = true
+    drag.preview = document.createElement('div')
+    drag.preview.className = 'profile-sort-preview'
+    drag.preview.textContent = drag.ids.length > 1 && drag.kind !== 'group' ? `${drag.ids.length} 台服务器` : drag.name
+    drag.preview.setAttribute('aria-hidden', 'true')
+    document.body.append(drag.preview)
+    elements.profileList.classList.add('profile-sorting')
+    for (const item of elements.profileList.querySelectorAll('.profile-item')) item.classList.toggle('profile-drag-source', drag.ids.includes(item.dataset.profileId))
+    updateProfileDrag()
+  }
+  if (drag.moved) event.preventDefault()
+}
+
+/** 每帧只更新轻量浮层和落点；停在列表边缘也可持续滚动到未显示的服务器。 */
+function updateProfileDrag () {
+  const drag = profileDrag
+  if (!drag?.moved) return
+  drag.preview.style.transform = `translate3d(${drag.x + 12}px, ${drag.y + 12}px, 0)`
+  const bounds = elements.profileList.getBoundingClientRect()
+  if (drag.x >= bounds.left && drag.x <= bounds.right) {
+    const direction = drag.y < bounds.top + 26 ? -1 : drag.y > bounds.bottom - 26 ? 1 : 0
+    if (direction) elements.profileList.scrollTop += direction * 8
+  }
+  const element = document.elementFromPoint(drag.x, drag.y)?.closest('.profile-item, .profile-group > summary')
+  const target = profileDropTargets.get(element)
+  const rect = element?.getBoundingClientRect()
+  const after = Boolean(rect && drag.y > rect.top + rect.height / 2)
+  if (drag.target?.element !== element || drag.target?.after !== after) {
+    clearProfileDropFeedback()
+    drag.target = target ? { ...target, element, after } : null
+    if (target) element.classList.add(!target.profileId && drag.kind !== 'group' ? 'profile-drop-group' : after ? 'profile-drop-after' : 'profile-drop-before')
+  }
+  profileDragFrame = window.requestAnimationFrame(updateProfileDrag)
+}
+
+function clearProfileDropFeedback () {
+  for (const element of elements.profileList.querySelectorAll('.profile-drop-before, .profile-drop-after, .profile-drop-group')) element.classList.remove('profile-drop-before', 'profile-drop-after', 'profile-drop-group')
+}
+
+/** Escape、失焦和放下均撤销临时落点；后台握手期间延后的列表刷新在这里补齐。 */
+function finishProfileDrag (commit = false) {
+  const drag = profileDrag
+  if (!drag) return
+  const change = commit && drag.moved && drag.target ? profileDropChange(drag, drag.target.group, drag.target.profileId, drag.target.after) : null
+  profileDrag = null
+  if (profileDragFrame !== null) window.cancelAnimationFrame(profileDragFrame)
+  profileDragFrame = null
+  if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId)
+  drag.preview?.remove()
+  clearProfileDropFeedback()
+  elements.profileList.classList.remove('profile-sorting')
+  renderProfiles()
+  if (change) saveProfileOrganization(change)
+}
+
+/** 本地过滤配置，保持 SSH / SFTP 主操作常驻；组织刷新不影响已连接终端。 */
+function renderProfiles () {
+  if (profileDrag) return
+  const scrollTop = elements.profileList.scrollTop
+  const focusedId = document.activeElement.closest?.('.profile-item')?.dataset.profileId
+  const focusedGroup = document.activeElement.closest?.('.profile-group')?.dataset.profileGroup
+  const focusedControl = document.activeElement.classList?.contains('profile-drag-handle') ? '.profile-drag-handle' : document.activeElement.classList?.contains('profile-check') ? '.profile-check' : null
+  elements.profileList.replaceChildren()
+  elements.profileList.classList.toggle('organizing', managingProfiles)
+  const query = profileSearch.value.trim().toLocaleLowerCase()
+  const profiles = visibleProfiles()
+  syncProfileSelection()
   document.querySelector('#profile-count').textContent = String(state.profiles.length)
   if (profiles.length === 0) {
     const message = document.createElement('p')
@@ -158,8 +416,22 @@ function renderProfiles () {
     if (group.grouped) {
       const details = document.createElement('details')
       details.className = 'profile-group'
+      details.dataset.profileGroup = group.key
       details.open = Boolean(query) || expandedProfileGroups.has(group.key)
       const summary = document.createElement('summary')
+      summary.title = `${group.manual ? '手动分组' : '按名称自动分组'} · 可拖入服务器，拖动把手调整组的位置`
+      summary.append(createProfileDragHandle(group.profiles.map(profile => profile.id), `${group.name} 分组`, 'group'))
+      if (managingProfiles) {
+        const checkbox = document.createElement('input')
+        checkbox.type = 'checkbox'
+        checkbox.className = 'profile-check'
+        checkbox.dataset.selectGroup = group.key
+        checkbox.disabled = profileOrganizationSaving
+        checkbox.setAttribute('aria-label', `选择 ${group.name} 当前显示的服务器`)
+        checkbox.addEventListener('click', event => event.stopPropagation())
+        checkbox.addEventListener('change', () => selectProfiles(members.map(profile => profile.id), checkbox.checked))
+        summary.append(checkbox)
+      }
       const title = document.createElement('span')
       title.textContent = group.name
       const count = document.createElement('span')
@@ -172,6 +444,7 @@ function renderProfiles () {
       }, `连接 ${group.name} 组内全部服务器`)
       connectAll.disabled = connectingGroups.has(group.key)
       summary.append(title, count, connectAll)
+      bindProfileDropTarget(summary, group)
       details.append(summary)
       // 搜索期间临时展开，不覆盖用户平时的分组展开状态。
       details.addEventListener('toggle', () => {
@@ -186,6 +459,16 @@ function renderProfiles () {
       const item = document.createElement('article')
       item.className = 'profile-item'
       item.dataset.profileId = profile.id
+      bindProfileDropTarget(item, group, profile.id)
+      if (managingProfiles) {
+        const checkbox = document.createElement('input')
+        checkbox.type = 'checkbox'
+        checkbox.className = 'profile-check'
+        checkbox.disabled = profileOrganizationSaving
+        checkbox.setAttribute('aria-label', `选择服务器 ${profile.name}`)
+        checkbox.addEventListener('change', () => selectProfiles([profile.id], checkbox.checked))
+        item.append(checkbox)
+      }
 
       const avatar = document.createElement('div')
       avatar.className = 'profile-avatar'
@@ -215,11 +498,20 @@ function renderProfiles () {
       sshButton.disabled = state.connectingProfiles.has(profile.id)
       if (sshButton.disabled) sshButton.textContent = '连接中…'
       actions.querySelector('.sftp').disabled = state.sftpConnecting.has(profile.id)
-      item.append(avatar, details, actions)
+      item.append(avatar, details, createProfileDragHandle([profile.id], profile.name, 'profile'), actions)
       parent.append(item)
     }
   }
   highlightProfile()
+  syncProfileSelection()
+  elements.profileList.scrollTop = scrollTop
+  if (focusedId && focusedControl) {
+    const item = [...elements.profileList.querySelectorAll('.profile-item')].find(item => item.dataset.profileId === focusedId)
+    item?.querySelector(focusedControl)?.focus({ preventScroll: true })
+  } else if (focusedGroup && focusedControl) {
+    const group = [...elements.profileList.querySelectorAll('.profile-group')].find(group => group.dataset.profileGroup === focusedGroup)
+    group?.querySelector(focusedControl)?.focus({ preventScroll: true })
+  }
 }
 
 /** 高亮只更新现有节点，不因终端输出而重建正在操作的配置卡片。 */
@@ -1994,6 +2286,51 @@ document.querySelector('#folder-cancel').addEventListener('click', () => folderD
 document.querySelector('#folder-cancel-x').addEventListener('click', () => folderDialog.close())
 profileSearch.addEventListener('input', renderProfiles)
 profileSearch.addEventListener('search', renderProfiles)
+document.querySelector('#manage-profiles').addEventListener('click', () => {
+  if (profileOrganizationSaving) return
+  managingProfiles = !managingProfiles
+  if (!managingProfiles) profileSelection.clear()
+  renderProfiles()
+})
+document.querySelector('#profile-select-visible').addEventListener('click', () => {
+  const ids = visibleProfiles().map(profile => profile.id)
+  selectProfiles(ids, !ids.every(id => profileSelection.has(id)))
+})
+document.querySelector('#assign-profile-group').addEventListener('click', showProfileGroupDialog)
+document.querySelector('#connect-selected-profiles').addEventListener('click', () => {
+  const profiles = groupProfiles(state.profiles).flatMap(group => group.profiles).filter(profile => profileSelection.has(profile.id))
+  // 任意多选复用组连接的四路并发、已有会话复用和失败反馈，不重发终端命令。
+  if (profiles.length && !profileOrganizationSaving) connectProfileGroup({ key: 'selection', name: '已选服务器', profiles })
+})
+document.querySelector('#profile-group-mode').addEventListener('change', syncProfileGroupMode)
+document.querySelector('#profile-group-form').addEventListener('submit', submitProfileGroup)
+for (const id of ['profile-group-cancel', 'profile-group-cancel-x']) {
+  document.querySelector(`#${id}`).addEventListener('click', () => {
+    if (!profileOrganizationSaving) document.querySelector('#profile-group-dialog').close()
+  })
+}
+document.querySelector('#profile-group-dialog').addEventListener('cancel', event => {
+  if (profileOrganizationSaving) event.preventDefault()
+})
+window.addEventListener('pointermove', moveProfileDrag)
+window.addEventListener('pointerup', event => {
+  if (event.pointerId === profileDrag?.pointerId) {
+    // 松手可能先于下一帧，按最后的真实指针位置重新命中，不提交上一帧的落点。
+    profileDrag.x = event.clientX
+    profileDrag.y = event.clientY
+    if (profileDragFrame !== null) window.cancelAnimationFrame(profileDragFrame)
+    updateProfileDrag()
+    finishProfileDrag(true)
+  }
+})
+window.addEventListener('pointercancel', () => finishProfileDrag())
+window.addEventListener('blur', () => finishProfileDrag())
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && profileDrag) {
+    event.preventDefault()
+    finishProfileDrag()
+  }
+})
 document.querySelector('#open-files').addEventListener('click', openFileWorkspace)
 addPaneResize(document.querySelector('.local-pane'))
 document.querySelector('#sidebar-toggle').addEventListener('click', () => {

@@ -13,6 +13,12 @@ const bridge = `
   const sessionPrompts = new Map();
   const profile = { id: 'render-fixture', name: '开发环境', host: '127.0.0.1', port: 2222, username: 'developer', auth: 'key', privateKeyPath: '/mock/key-not-read' };
   const profiles = [profile, { ...profile, id: 'preview-staging', name: '测试集群1', host: 'staging.example.com' }, { ...profile, id: 'preview-backup', name: '测试集群3', host: 'backup.example.com' }];
+  // ?organize 与原生 --organize 使用相同名称场景；仅替换静态假配置。
+  if (new URLSearchParams(location.search).has('organize')) {
+    profiles.splice(0, profiles.length, ...['东京', '后台API', '游戏服', 'mamo线上1', 'mamo线上2'].map((name, index) => ({
+      ...profile, id: '00000000-0000-4000-8000-00000000000' + (index + 1), name, username: 'demo', host: 'organize' + index + '.example.com'
+    })));
+  }
   // ?many 只扩充静态假配置，用来复现多标签/长名称溢出，不读取用户主机信息。
   if (new URLSearchParams(location.search).has('many')) {
     for (let index = 1; index <= 12; index++) profiles.push({ ...profile, id: 'layout-' + index, name: '视觉验收服务器集群-' + index, host: 'layout' + index + '.example.com' });
@@ -57,7 +63,29 @@ const bridge = `
       }
     },
     profiles: {
-      list: async () => profiles,
+      list: async () => profiles.map(profile => ({ ...profile })),
+      // 在内存中模拟完整快照返回；不触及真实配置文件或远程连接。
+      organize: async change => {
+        const selected = new Set(change.ids || []);
+        let next = profiles.map(profile => {
+          const updated = { ...profile };
+          if (selected.has(profile.id)) {
+            // null 恢复自动分组，空字符串保留显式独立，和实际存储契约一致。
+            if (change.group === null) delete updated.group;
+            else updated.group = change.group;
+          }
+          return updated;
+        });
+        if (change.order) {
+          const byId = new Map(next.map(profile => [profile.id, profile]));
+          if (change.order.length !== profiles.length || new Set(change.order).size !== profiles.length || change.order.some(id => !byId.has(id))) {
+            throw new Error('预览排序必须包含全部服务器且不可重复');
+          }
+          next = change.order.map((id, order) => ({ ...byId.get(id), order }));
+        }
+        profiles.splice(0, profiles.length, ...next);
+        return profiles.map(profile => ({ ...profile }));
+      },
       create: async input => profiles.push({ ...input, id: 'fixture-' + profiles.length }),
       createBatch: async (common, text) => text.split(/\\r?\\n/).filter(line => line.trim()).map(line => {
         const fields = line.split(/[,，]/).map(value => value.trim());

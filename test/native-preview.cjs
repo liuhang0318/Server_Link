@@ -52,10 +52,14 @@ app.whenReady().then(() => {
   )
 })
 
-const profiles = [1, 2].map(index => ({
-  id: `00000000-0000-4000-8000-00000000000${index}`,
-  name: `快捷键演示${index}`,
-  host: `native-preview-${index}.example.com`,
+// --organize 提供独立名称与同前缀样本，便于验收拖动、手动分组及整组连接。
+const profileNames = process.argv.includes('--organize')
+  ? ['东京', '后台API', '游戏服', 'mamo线上1', 'mamo线上2']
+  : ['快捷键演示1', '快捷键演示2']
+const profiles = profileNames.map((name, offset) => ({
+  id: `00000000-0000-4000-8000-00000000000${offset + 1}`,
+  name,
+  host: `native-preview-${offset + 1}.example.com`,
   port: 22,
   username: 'demo',
   auth: 'agent',
@@ -67,6 +71,29 @@ class ProfileStore {
   async init () {}
   async list () { return profiles.map(profile => ({ ...profile })) }
   async get (id) { return profiles.find(profile => profile.id === id) }
+
+  /** 只在隔离内存中重排和改组，返回完整快照以复现真实 IPC 的刷新语义。 */
+  async organize (change) {
+    const selected = new Set(change.ids || [])
+    let next = profiles.map(profile => {
+      const updated = { ...profile }
+      if (selected.has(profile.id)) {
+        // null 恢复前缀分组，空字符串显式独立；不可把两者都当成删除属性。
+        if (change.group === null) delete updated.group
+        else updated.group = change.group
+      }
+      return updated
+    })
+    if (change.order) {
+      const byId = new Map(next.map(profile => [profile.id, profile]))
+      if (change.order.length !== profiles.length || new Set(change.order).size !== profiles.length || change.order.some(id => !byId.has(id))) {
+        throw new Error('预览排序必须包含全部服务器且不可重复')
+      }
+      next = change.order.map((id, order) => ({ ...byId.get(id), order }))
+    }
+    profiles.splice(0, profiles.length, ...next)
+    return this.list()
+  }
 }
 
 /** 模拟终端生命周期；write 仅回显，绝不创建 PTY、调用 shell 或建立 SSH。 */

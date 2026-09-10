@@ -20,7 +20,12 @@
         <button id="open-files" class="ghost-button files-nav" type="button"><svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7V5h6l2 2h10v13H3Z"/><path d="M3 10h18"/></svg><span>文件管理</span><small>SFTP</small></button>
         <div class="sidebar-heading">
           <span>服务器 <span id="profile-count">0</span></span>
-          <button id="add-profile" class="icon-button" type="button" aria-label="新增服务器">＋</button>
+          <div class="sidebar-heading-actions"><button id="manage-profiles" class="text-button" type="button" aria-pressed="false">管理</button><button id="add-profile" class="icon-button" type="button" aria-label="新增服务器">＋</button></div>
+        </div>
+        <div id="profile-selection-tools" class="profile-selection-tools hidden">
+          <div><span id="profile-selection-count" role="status">已选 0 台</span><button id="profile-select-visible" class="text-button" type="button">全选当前列表</button></div>
+          <div><button id="assign-profile-group" class="ghost-button" type="button" disabled>加入分组</button><button id="connect-selected-profiles" class="connect-button" type="button" disabled>批量连接</button></div>
+          <small>拖动 ⠿ 排序，拖到组标题加入分组</small>
         </div>
         <div id="profile-list" class="profile-list" aria-live="polite"></div>
         <div class="security-note">
@@ -73,6 +78,18 @@
         </section>
       </main>
     </div>
+
+    <dialog id="profile-group-dialog" class="secret-dialog" aria-labelledby="profile-group-title">
+      <form id="profile-group-form">
+        <div class="dialog-heading"><div><p class="eyebrow">ORGANIZE SERVERS</p><h2 id="profile-group-title">设置分组</h2></div><button id="profile-group-cancel-x" class="icon-button" type="button" aria-label="关闭分组设置">×</button></div>
+        <p id="profile-group-selection" class="form-note"></p>
+        <label><span>分组方式</span><select id="profile-group-mode"><option value="manual">新建或加入分组</option><option value="none">不分组，独立显示</option><option value="auto">恢复按名称自动分组</option></select></label>
+        <label id="profile-group-name-row"><span>分组名称</span><input id="profile-group-name" list="profile-group-options" maxlength="80" placeholder="输入新组名，或选择已有组名" autocomplete="off" required><datalist id="profile-group-options"></datalist></label>
+        <p class="form-note">只调整分组，不修改连接配置，也不会断开已打开的终端。</p>
+        <p id="profile-group-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button id="profile-group-cancel" class="ghost-button" type="button">取消</button><button id="profile-group-save" class="primary-button" type="submit">保存分组</button></div>
+      </form>
+    </dialog>
 
     <dialog id="profile-dialog" class="profile-dialog">
       <form id="profile-form" method="dialog" autocomplete="off">

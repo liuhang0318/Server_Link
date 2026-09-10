@@ -80,6 +80,8 @@ const api = Object.freeze({
     createBatch: (common, hostsText) => ipcRenderer.invoke('profiles:create-batch', common, requireString(hostsText, 'hostsText')),
     /** @param {string} id @param {ProfileInput} profile */
     update: (id, profile) => ipcRenderer.invoke('profiles:update', requireString(id, 'id'), profile),
+    /** 分组和全量排序由主进程原子校验、写入；不开放连接凭据或通用文件修改能力。 */
+    organize: change => ipcRenderer.invoke('profiles:organize', change),
     remove: id => ipcRenderer.invoke('profiles:remove', requireString(id, 'id'))
   }),
   privateKeys: Object.freeze({

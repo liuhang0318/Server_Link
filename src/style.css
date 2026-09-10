@@ -37,11 +37,35 @@ input::placeholder { color: #8594a8; }
 .profile-search input { width: 100%; border: 0; outline: none; background: transparent; font-size: 12px; }
 .profile-search kbd { flex-shrink: 0; font: 10px inherit; color: #a7b4c6; }
 .sidebar-heading { display: flex; justify-content: space-between; align-items: center; padding: 0 6px 12px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.sidebar-heading-actions { display: flex; align-items: center; gap: 5px; }
+#manage-profiles[aria-pressed="true"] { color: var(--accent); background: #284237; }
+.profile-selection-tools { margin-bottom: 12px; padding: 10px; border: 1px solid #3d594f; border-radius: 10px; background: #1d302b; }
+.profile-selection-tools > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.profile-selection-tools > div + div { margin-top: 8px; }
+.profile-selection-tools small { display: block; margin-top: 10px; color: #a5bdb1; font-size: 10px; }
+#profile-selection-count { color: #c5e7d9; font-size: 11px; white-space: nowrap; }
+.profile-selection-tools .text-button { font-size: 10px; padding: 3px; }
 #profile-count { margin-left: 5px; color: #77889f; font-variant-numeric: tabular-nums; }
 .icon-button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: transparent; font-size: 18px; }
 .icon-button:hover { background: var(--raised); border-color: #536275; }
 .profile-list { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
-.profile-item { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 12px 10px; border: 1px solid #2c3947; border-radius: 12px; background: #1b2531; transition: background .18s, border-color .18s, box-shadow .18s; }
+.profile-item { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 18px; gap: 8px; padding: 12px 10px; border: 1px solid #2c3947; border-radius: 12px; background: #1b2531; transition: background .18s, border-color .18s, box-shadow .18s; }
+.profile-drag-handle { width: 18px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: #869bab; background: transparent; font-size: 18px; cursor: grab; touch-action: none; -webkit-app-region: no-drag; }
+.profile-drag-handle:hover, .profile-drag-handle:focus-visible { color: #d5f4e6; background: #ffffff0d; }
+.profile-drag-handle:active { cursor: grabbing; }
+.profile-drag-handle[aria-disabled="true"] { opacity: .45; cursor: wait; }
+.profile-list.organizing .profile-item { grid-template-columns: 16px 28px minmax(0, 1fr) 18px; gap: 7px; }
+.profile-list.organizing .profile-avatar { width: 28px; height: 28px; }
+.profile-check { width: 14px; height: 14px; margin: 6px 0 0; accent-color: var(--accent); }
+.profile-item.profile-checked { border-color: #6b9c8a; background: #243b34; }
+.profile-group .profile-check { flex: 0 0 14px; margin: 0; }
+.profile-group .profile-drag-handle { flex: 0 0 18px; height: 22px; margin-left: -4px; }
+.profile-list.profile-sorting .profile-drag-source { opacity: .4; }
+.profile-sort-preview { position: fixed; left: 0; top: 0; z-index: 2000; pointer-events: none; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 10px 16px; border: 1px solid #8dcdb4; border-radius: 9px; color: #dcfff0; background: #294a3b; box-shadow: 0 8px 24px #0005; font-size: 12px; }
+/* 拖动仅标记落点，真正重排在保存成功后发生；不能用动画中的位置决定归属。 */
+.profile-drop-before { box-shadow: inset 0 3px 0 #a0e7cf !important; }
+.profile-drop-after { box-shadow: inset 0 -3px 0 #a0e7cf !important; }
+.profile-drop-group { background: #315343; outline: 1px dashed #93dcc0; outline-offset: -1px; border-radius: 8px; }
 .profile-item:hover { border-color: #4b6170; background: #202e3a; box-shadow: 0 4px 12px #0002; }
 .profile-item.selected { background: #233236; border-color: #496e67; box-shadow: inset 2px 0 0 #8edbc4; }
 .profile-avatar { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: #2c3849; color: #b6c8dd; font-size: 13px; font-weight: 600; }
