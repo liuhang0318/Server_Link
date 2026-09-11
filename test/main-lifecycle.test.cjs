@@ -174,7 +174,10 @@ async function createMainHarness () {
     BrowserWindow: FakeBrowserWindow,
     dialog: {},
     Menu: {
-      buildFromTemplate: template => template,
+      buildFromTemplate: template => {
+        template.popup = options => { calls.popup = { template, options } }
+        return template
+      },
       setApplicationMenu: menu => { calls.menu = menu }
     },
     ipcMain: {
@@ -224,6 +227,57 @@ function startSession (harness, sender) {
     'profile-id'
   )
 }
+
+test('native tab menu uses a fixed action list, stays in its owner window and dismisses without action', async () => {
+  const h = await createMainHarness()
+  const window = h.windows[0]
+  const sender = window.webContents
+  const show = h.ipcHandlers.get('app:tab-menu')
+  const event = { sender, senderFrame: sender.mainFrame }
+  const result = show(event, { kind: 'ssh', reconnect: true, busy: false })
+  assert.equal(h.calls.popup.options.window, window)
+  assert.deepEqual(Array.from(h.calls.popup.template.filter(item => item.label), item => item.label), ['重新连接', '复制连接', '在新窗口中打开副本', '重命名标签…', '关闭'])
+  h.calls.popup.template.find(item => item.label === '复制连接').click()
+  h.calls.popup.options.callback()
+  assert.equal(await result, 'duplicate')
+  const dismissed = show(event, { kind: 'sftp', reconnect: false, busy: true })
+  assert.equal(h.calls.popup.template.find(item => item.label === '刷新文件列表').enabled, false)
+  assert.equal(h.calls.popup.template.find(item => item.label === '关闭').enabled, true)
+  h.calls.popup.options.callback()
+  assert.equal(await dismissed, null)
+  assert.throws(() => show({ sender, senderFrame: {} }, { kind: 'ssh', reconnect: true, busy: false }), /untrusted/u)
+  assert.throws(() => show(event, { kind: 'arbitrary-role', reconnect: true, busy: false }), /invalid/u)
+  const pending = show(event, { kind: 'local', reconnect: false, busy: false })
+  window.destroy()
+  assert.equal(await pending, null)
+})
+
+test('new connection windows consume only their own validated launch request once', async () => {
+  const h = await createMainHarness()
+  const source = h.windows[0].webContents
+  const event = { sender: source, senderFrame: source.mainFrame }
+  const open = h.ipcHandlers.get('app:open-connection-window')
+  const take = h.ipcHandlers.get('app:take-initial-connection')
+  const opening = open(event, { kind: 'ssh', profileId: 'profile-id', title: '部署终端', command: 'must-not-copy', secret: 'must-not-copy' })
+  h.resolveProfile({ id: 'profile-id' })
+  assert.equal(await opening, true)
+  assert.equal(h.windows.length, 2)
+  assert.equal(take(event), null)
+  const child = h.windows[1].webContents
+  const childEvent = { sender: child, senderFrame: child.mainFrame }
+  assert.deepEqual(JSON.parse(JSON.stringify(take(childEvent))), { kind: 'ssh', profileId: 'profile-id', title: '部署终端' })
+  assert.equal(take(childEvent), null)
+  await assert.rejects(open(event, { kind: 'shell', profileId: 'profile-id', title: 'unsafe' }), /invalid/u)
+  await assert.rejects(open(event, { kind: 'ssh', profileId: 'profile-id', title: 'unsafe\nname' }), /invalid/u)
+  const missing = open(event, { kind: 'sftp', profileId: 'missing', title: 'missing' })
+  h.resolveProfile(null)
+  await assert.rejects(missing, /配置已删除/u)
+  const late = open(event, { kind: 'ssh', profileId: 'profile-id', title: 'late' })
+  h.windows[0].destroy()
+  h.resolveProfile({ id: 'profile-id' })
+  assert.equal(await late, false)
+  assert.equal(h.windows.length, 1)
+})
 
 test('main closes renderers before PTY wait and rejects their pending session starts', async () => {
   const harness = await createMainHarness()

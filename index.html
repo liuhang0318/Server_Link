@@ -186,6 +186,15 @@
       </form>
     </dialog>
 
+    <dialog id="tab-name-dialog" class="secret-dialog" aria-labelledby="tab-name-title">
+      <form id="tab-name-form" autocomplete="off">
+        <div class="dialog-heading"><div><p class="eyebrow">TAB NAME</p><h2 id="tab-name-title">重命名标签</h2></div><button id="tab-name-cancel-x" class="icon-button" type="button" aria-label="关闭重命名">×</button></div>
+        <label><span>标签名称</span><input id="tab-name" required maxlength="80" spellcheck="false"></label>
+        <p class="form-note">仅修改当前标签的显示名称，不影响服务器配置。</p>
+        <p id="tab-name-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button id="tab-name-cancel" class="ghost-button" type="button">取消</button><button class="primary-button" type="submit">保存</button></div>
+      </form>
+    </dialog>
     <dialog id="folder-dialog" class="secret-dialog" aria-labelledby="folder-title">
       <form id="folder-form" autocomplete="off">
         <div class="dialog-heading"><div><p class="eyebrow">NEW FOLDER</p><h2 id="folder-title">新建文件夹</h2></div><button id="folder-cancel-x" type="button" class="icon-button" aria-label="关闭新建文件夹">×</button></div>

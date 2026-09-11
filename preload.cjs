@@ -58,6 +58,10 @@ function getPathForDroppedPrivateKey (file) {
 
 const api = Object.freeze({
   app: Object.freeze({
+    /** 原生菜单只返回固定动作；连接副本只传配置 ID，不传凭据、命令或任意页面地址。 */
+    tabMenu: options => ipcRenderer.invoke('app:tab-menu', options),
+    openConnectionWindow: input => ipcRenderer.invoke('app:open-connection-window', input),
+    takeInitialConnection: () => ipcRenderer.invoke('app:take-initial-connection'),
     /** 单向接收明确的原生菜单动作，不泄漏 Electron 事件或开放通用 IPC。 */
     onAction: listener => {
       if (typeof listener !== 'function') throw new TypeError('listener must be a function')

@@ -69,6 +69,8 @@ let tabOrder = []
 let tabPointer = null
 let tabDragFrame = null
 let suppressTabClickUntil = 0
+let localTabTitle = '本机文件'
+let renameTabTarget = null
 const expandedProfileGroups = new Set()
 const connectingGroups = new Set()
 const profileSelection = new Set()
@@ -886,7 +888,7 @@ function syncTerminalPresentation (session) {
 }
 
 /** 只响应已断开标签的手动重连；原位替换，不复制历史输入，用户关闭或切走始终优先。 */
-async function reconnectSession (session) {
+async function reconnectSession (session, { quiet = false } = {}) {
   if (state.sessions.get(session.id) !== session || session.status !== 'exited' || session.reconnecting) return
   if (!profileById(session.profileId)) return notify('服务器配置已删除，请重新添加后连接', true)
   if (state.connectingProfiles.has(session.profileId)) return notify('此服务器正在建立连接，请稍后重试')
@@ -894,7 +896,7 @@ async function reconnectSession (session) {
   syncTerminalPresentation(session)
   try {
     // 只建立新的 SSH 会话，旧终端保留到新会话创建成功；失败时仍可查看输出并再次尝试。
-    const replacementId = await connectProfile(session.profileId, { activate: false })
+    const replacementId = await connectProfile(session.profileId, { activate: false, quiet, forceNew: true })
     const replacement = state.sessions.get(replacementId)
     if (!replacement) return
     if (state.sessions.get(session.id) !== session) {
@@ -902,6 +904,7 @@ async function reconnectSession (session) {
       await removeSession(replacement, true)
       return
     }
+    replacement.title = session.title
     const oldKey = `ssh:${session.id}`
     const newKey = `ssh:${replacementId}`
     tabOrder = tabOrder.filter(key => key !== newKey).map(key => key === oldKey ? newKey : key)
@@ -914,6 +917,7 @@ async function reconnectSession (session) {
     }
     if (!state.sftpActive && state.activeSessionId === session.id) activateSession(replacementId)
     await removeSession(session, false)
+    return replacementId
   } catch (error) {
     if (state.sessions.get(session.id) === session) notify(errorMessage(error), true)
   } finally {
@@ -922,10 +926,21 @@ async function reconnectSession (session) {
   }
 }
 
-/** 合并连续点击，构建终端失败时释放已启动的原生会话。 */
-async function connectProfile (profileId, { activate = true, quiet = false } = {}) {
+/** 普通入口优先复用在线/断线标签；只有明确复制或内部重连才创建新会话，避免侧栏和批量连接留下重复标签。 */
+async function connectProfile (profileId, { activate = true, quiet = false, forceNew = false } = {}) {
   const profile = profileById(profileId)
-  if (!profile || state.connectingProfiles.has(profileId)) return
+  if (!profile) return
+  if (!forceNew) {
+    const matches = [...state.sessions.values()].filter(item => item.profileId === profileId)
+    const existing = matches.find(item => item.status === 'running') ?? matches.find(item => item.status === 'exited')
+    if (existing) {
+      // 选择发生在等待前；之后即使用户切走，重连完成也不能夺回焦点。
+      if (activate) activateSession(existing.id)
+      if (existing.status === 'running') return existing.id
+      return reconnectSession(existing, { quiet })
+    }
+  }
+  if (state.connectingProfiles.has(profileId)) return
   state.connectingProfiles.add(profileId)
   renderProfiles()
   let sessionId
@@ -1970,6 +1985,98 @@ function createSshTab (session) {
   })
 }
 
+/** 菜单绑定被右击的对象而非当前标签；异步返回后再次校验归属，防止误关重连后的其他会话。 */
+function tabTarget (key) {
+  if (key === 'files:local') return state.filesOpen ? { kind: 'local', title: localTabTitle, current: () => state.filesOpen, close: closeFileWorkspace } : null
+  const kind = key.startsWith('ssh:') ? 'ssh' : 'sftp'
+  const entry = kind === 'ssh' ? state.sessions.get(key.slice(4)) : state.sftpConnections.get(key.slice(5))
+  if (!entry) return null
+  return {
+    kind,
+    entry,
+    profileId: entry.profileId,
+    title: kind === 'ssh' ? entry.title : entry.tabTitle ?? entry.title.replace(/ · SFTP$/u, ''),
+    current: () => kind === 'ssh' ? state.sessions.get(entry.id) === entry : state.sftpConnections.get(entry.connectionId) === entry,
+    close: () => kind === 'ssh' ? removeSession(entry, true) : closeSftp(entry, { force: true })
+  }
+}
+
+/** 使用 macOS 原生菜单获得键盘导航、边缘定位和关闭行为；右击不激活背景标签。 */
+async function showTabMenu (event) {
+  const tab = event.target.closest('[data-tab-key]')
+  if (!tab || document.querySelector('dialog[open]')) return
+  event.preventDefault()
+  const target = tabTarget(tab.dataset.tabKey)
+  if (!target) return
+  const { kind, entry } = target
+  const reconnect = kind === 'ssh' ? entry.status === 'exited' : kind === 'sftp' && entry.status === 'failed'
+  const busy = kind === 'ssh' ? Boolean(entry.reconnecting || state.connectingProfiles.has(entry.profileId)) : kind === 'sftp' && (entry.busy || (entry.status !== 'ready' && entry.status !== 'failed'))
+  try {
+    const action = await api.app.tabMenu({ kind, reconnect, busy: Boolean(busy) })
+    if (!action || !target.current()) return
+    if (action === 'close') {
+      // 与 × 一致：关闭指定连接并立即终止其传输，不先切换用户当前视图。
+      await target.close()
+    } else if (action === 'rename') {
+      renameTabTarget = target
+      const input = document.querySelector('#tab-name')
+      input.value = target.title
+      document.querySelector('#tab-name-error').textContent = ''
+      document.querySelector('#tab-name-dialog').showModal()
+      input.focus()
+      input.select()
+    } else if (action === 'new-window') {
+      await api.app.openConnectionWindow({ kind, profileId: target.profileId ?? null, title: target.title })
+    } else if (action === 'duplicate' && kind === 'ssh') {
+      // 显式复制才绕过普通连接的复用规则；新终端从登录开始，绝不重发旧输入。
+      const id = await connectProfile(entry.profileId, { forceNew: true })
+      const copy = state.sessions.get(id)
+      if (copy) { copy.title = entry.title; renderTabs() }
+    } else if (action === 'reconnect') {
+      if (kind === 'ssh') await reconnectSession(entry)
+      else if (kind === 'sftp' && entry.status === 'failed') await connectSftp(entry.profileId, { activate: false, connection: entry })
+    } else if (action === 'refresh' && kind === 'sftp' && entry.status === 'ready' && !entry.busy) {
+      await refreshSftp(entry.path, entry)
+    }
+  } catch (error) {
+    notify(errorMessage(error), true)
+  }
+}
+
+/** 名称仅属于当前标签，不持久化到服务器配置；过期对象不能改名到另一条连接。 */
+function renameTab (event) {
+  event.preventDefault()
+  const name = document.querySelector('#tab-name').value.trim()
+  if (!name || name.length > 80 || /\p{Cc}/u.test(name)) {
+    document.querySelector('#tab-name-error').textContent = '请输入 1～80 个字符的标签名称'
+    return
+  }
+  if (renameTabTarget?.current()) {
+    if (renameTabTarget.kind === 'local') localTabTitle = name
+    else if (renameTabTarget.kind === 'ssh') renameTabTarget.entry.title = name
+    else renameTabTarget.entry.tabTitle = name
+    renderTabs()
+  }
+  document.querySelector('#tab-name-dialog').close()
+}
+
+/** 新窗口完成配置加载后才消费启动请求；只新建连接，不继承终端输入或上传任务。 */
+async function openInitialConnection (initial) {
+  if (!initial) return
+  if (initial.kind === 'local') {
+    localTabTitle = initial.title || '本机文件'
+    await openFileWorkspace()
+    return
+  }
+  const id = initial.kind === 'ssh' ? await connectProfile(initial.profileId) : await connectSftp(initial.profileId)
+  const entry = initial.kind === 'ssh' ? state.sessions.get(id) : state.sftpConnections.get(id)
+  if (entry && initial.title) {
+    if (initial.kind === 'ssh') entry.title = initial.title
+    else entry.tabTitle = initial.title
+    renderTabs()
+  }
+}
+
 /** 渲染期间保留统一顺序；拖动时延后状态重绘，避免销毁指针捕获节点。 */
 function renderTabs () {
   if (tabPointer) return
@@ -1985,7 +2092,7 @@ function renderTabs () {
   if (state.filesOpen) {
     elements.tabs.append(createClosableTab({
       key: 'files:local',
-      title: '本机文件',
+      title: localTabTitle,
       kind: 'local',
       active: state.sftpActive && !state.sftp,
       onSelect: openFileWorkspace,
@@ -1997,7 +2104,7 @@ function renderTabs () {
     elements.tabs.append(createSshTab(session))
   }
   for (const connection of state.sftpConnections.values()) {
-    const label = `${connection.title.replace(/ · SFTP$/u, '')}${connection.status === 'ready' ? '' : connection.status === 'failed' ? ' · 失败' : ' · 连接中'}`
+    const label = `${connection.tabTitle ?? connection.title.replace(/ · SFTP$/u, '')}${connection.status === 'ready' ? '' : connection.status === 'failed' ? ' · 失败' : ' · 连接中'}`
     const tab = createClosableTab({
       key: `sftp:${connection.connectionId}`,
       title: label,
@@ -2288,6 +2395,10 @@ document.querySelector('#app').addEventListener('transitionend', event => {
 const tabResizeObserver = new window.ResizeObserver(syncTabScrollControls)
 tabResizeObserver.observe(elements.tabs)
 elements.tabs.addEventListener('scroll', syncTabScrollControls, { passive: true })
+elements.tabs.addEventListener('contextmenu', showTabMenu)
+document.querySelector('#tab-name-form').addEventListener('submit', renameTab)
+document.querySelector('#tab-name-dialog').addEventListener('close', () => { renameTabTarget = null })
+for (const id of ['tab-name-cancel', 'tab-name-cancel-x']) document.querySelector(`#${id}`).addEventListener('click', () => document.querySelector('#tab-name-dialog').close())
 for (const [id, direction] of [['tabs-scroll-left', -1], ['tabs-scroll-right', 1]]) {
   document.querySelector(`#${id}`).addEventListener('click', () => {
     elements.tabs.scrollBy({ left: direction * Math.max(160, elements.tabs.clientWidth * 0.8), behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
@@ -2337,6 +2448,8 @@ window.addEventListener('drop', clearFileDragFeedback, { capture: true })
 window.addEventListener('dragend', clearFileDragFeedback)
 window.addEventListener('blur', clearFileDragFeedback)
 elements.tabs.addEventListener('pointerdown', event => {
+  // 右键只打开菜单，不把终端键盘焦点挪到未选中的标签。
+  if (event.button === 2) { event.preventDefault(); return }
   if (event.target.closest('.tab-close')) return
   const tab = event.target.closest('.session-tab')
   if (!tab || event.button !== 0 || !event.isPrimary || tabPointer) return
@@ -2541,6 +2654,7 @@ try {
   state.profiles = await api.profiles.list()
   renderProfiles()
   syncWorkspaceState()
+  await openInitialConnection(await api.app.takeInitialConnection())
 } catch (error) {
   elements.profileList.textContent = `无法读取连接配置：${errorMessage(error)}`
 }

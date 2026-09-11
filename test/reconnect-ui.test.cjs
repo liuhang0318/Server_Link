@@ -19,6 +19,7 @@ function harness () {
   const profile = { id: 'profile-old', name: 'Old server' }
   const makeSession = (id, profileId = id, status = 'running') => ({
     id,
+    title: `Title ${id}`,
     profileId,
     status,
     connected: status === 'exited',
@@ -287,4 +288,59 @@ test('real terminal input drops disconnected keystrokes but preserves one-shot h
   input('ls\r')
   assert.deepEqual(writes, [{ id: 'old', data: 'handshake secret\r' }, { id: 'old', data: 'ls\r' }])
   assert.deepEqual(predicted, ['ls\r'])
+})
+
+test('sidebar connection reuses a disconnected tab, keeps its custom title and returns the replacement ID', async () => {
+  const h = harness()
+  h.session.title = '部署终端'
+  const connecting = h.context.connectProfile(h.session.profileId)
+  assert.equal(h.starts.length, 1)
+  h.state.activeSessionId = 'after'
+  h.starts[0].resolve({ sessionId: 'replacement' })
+  assert.equal(await connecting, 'replacement')
+  assert.equal(h.state.sessions.size, 3)
+  assert.equal(h.state.sessions.has('old'), false)
+  assert.equal(h.state.sessions.get('replacement').title, '部署终端')
+  assert.equal(h.state.activeSessionId, 'after')
+  assert.deepEqual(Array.from(h.context.tabOrder), ['ssh:before', 'ssh:replacement', 'files:local', 'ssh:after'])
+})
+
+test('ordinary connect reuses a running or connecting tab; explicit duplicate alone starts an extra session', async () => {
+  for (const connected of [true, false]) {
+    const h = harness()
+    h.session.status = 'running'
+    h.session.connected = connected
+    assert.equal(await h.context.connectProfile(h.session.profileId), 'old')
+    assert.equal(h.starts.length, 0)
+    const duplicate = h.context.connectProfile(h.session.profileId, { forceNew: true })
+    h.starts[0].resolve({ sessionId: 'copy' })
+    assert.equal(await duplicate, 'copy')
+    assert.equal(h.state.sessions.size, 4)
+    assert.equal(h.state.sessions.has('old'), true)
+  }
+})
+
+test('batch connect reuses disconnected tabs through the shared connection entry point', async () => {
+  const h = harness()
+  Object.assign(h.context, {
+    connectingGroups: new Set(),
+    expandedProfileGroups: new Set(),
+    connectBatch: (profiles, connect) => Promise.all(profiles.map(connect))
+  })
+  const start = source.indexOf('async function connectProfileGroup (')
+  vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), h.context)
+  const connecting = h.context.connectProfileGroup({ key: 'group', name: '测试组', profiles: h.state.profiles })
+  h.starts[0].resolve({ sessionId: 'replacement' })
+  await connecting
+  assert.equal(h.state.sessions.size, 3)
+  assert.equal(h.state.sessions.has('old'), false)
+  assert.deepEqual(Array.from(h.context.tabOrder), ['ssh:before', 'ssh:replacement', 'files:local', 'ssh:after'])
+})
+
+test('an online duplicate takes priority over stale disconnected tabs when clicking the sidebar', async () => {
+  const h = harness()
+  h.state.sessions.set('online', { id: 'online', profileId: h.session.profileId, status: 'running' })
+  assert.equal(await h.context.connectProfile(h.session.profileId), 'online')
+  assert.equal(h.starts.length, 0)
+  assert.equal(h.state.activeSessionId, 'online')
 })

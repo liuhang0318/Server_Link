@@ -33,6 +33,7 @@ let quitPending = false
 let shutdownComplete = false
 let windowsReady = false
 const bundledRendererUrl = pathToFileURL(path.join(__dirname, 'dist', 'index.html')).href
+const initialConnections = new WeakMap()
 
 function assertMainFrame (event) {
   if (
@@ -114,6 +115,44 @@ function uploadProgress (sender) {
 
 /** Registers the narrow, typed IPC surface available to the sandboxed UI. */
 function registerIpc () {
+  ipcMain.handle('app:tab-menu', (event, options) => {
+    assertMainFrame(event)
+    const window = windowForSender(event.sender)
+    if (quitPending || !window || window.isDestroyed()) return null
+    if (!options || !['ssh', 'sftp', 'local'].includes(options.kind) || typeof options.reconnect !== 'boolean' || typeof options.busy !== 'boolean') throw new TypeError('invalid tab menu')
+    // 只接受状态，不接受 renderer 提供的菜单代码、任意角色或快捷键；动作最终由原标签对象执行。
+    return new Promise(resolve => {
+      const finish = action => {
+        event.sender.removeListener('destroyed', dismissed)
+        resolve(action)
+      }
+      const dismissed = () => finish(null)
+      const item = (label, action, enabled = true) => ({ label, enabled, click: () => finish(action) })
+      const template = []
+      if (options.reconnect) template.push(item('重新连接', 'reconnect', !options.busy), { type: 'separator' })
+      if (options.kind === 'ssh') template.push(item('复制连接', 'duplicate', !options.busy))
+      if (options.kind === 'sftp' && !options.reconnect) template.push(item('刷新文件列表', 'refresh', !options.busy))
+      template.push(item('在新窗口中打开副本', 'new-window'), item('重命名标签…', 'rename'), { type: 'separator' }, item('关闭', 'close'))
+      event.sender.once('destroyed', dismissed)
+      Menu.buildFromTemplate(template).popup({ window, callback: dismissed })
+    })
+  })
+  ipcMain.handle('app:open-connection-window', async (event, input) => {
+    assertMainFrame(event)
+    if (!input || !['ssh', 'sftp', 'local'].includes(input.kind) || typeof input.title !== 'string' || input.title.length > 80 || /\p{Cc}/u.test(input.title)) throw new TypeError('invalid connection window')
+    if (input.kind !== 'local' && (typeof input.profileId !== 'string' || !await profileStore.get(input.profileId))) throw new Error('服务器配置已删除')
+    // 配置读取期间原窗口可能关闭；新窗口独立拥有 PTY/SFTP，不迁移原连接、凭据或历史输入。
+    if (quitPending || event.sender.isDestroyed() || !windowForSender(event.sender)) return false
+    createWindow({ kind: input.kind, profileId: input.kind === 'local' ? null : input.profileId, title: input.title })
+    return true
+  })
+  ipcMain.handle('app:take-initial-connection', event => {
+    assertMainFrame(event)
+    const initial = initialConnections.get(event.sender) ?? null
+    // 每个新窗口只能消费自己的启动请求一次，刷新页面不能再次自动建立连接。
+    initialConnections.delete(event.sender)
+    return initial
+  })
   ipcMain.handle('local:list', (event, directoryId) => localFiles.list(assertMainFrame(event), directoryId))
   ipcMain.handle('local:upload', async (event, fileIds, targets) => {
     const ownerId = assertMainFrame(event)
@@ -283,8 +322,8 @@ function registerIpc () {
   ))
 }
 
-/** Creates the only application window with remote content capabilities off. */
-function createWindow () {
+/** Creates the only application document in an isolated owner window; remote content capabilities stay off. */
+function createWindow (initialConnection = null) {
   const window = new BrowserWindow({
     width: 1240,
     height: 780,
@@ -308,6 +347,7 @@ function createWindow () {
   })
 
   const ownerId = window.webContents.id
+  if (initialConnection) initialConnections.set(window.webContents, initialConnection)
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   window.webContents.on('will-attach-webview', event => event.preventDefault())

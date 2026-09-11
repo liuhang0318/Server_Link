@@ -49,8 +49,8 @@ const bridge = `
     return results;
   }
   window.serverLink = {
-    // 网页预览没有原生菜单，只模拟单向 app 事件；实际 ⌘W/⌘Q 另用 Electron 验收。
-    app: { onAction: () => () => {} },
+    // 原生菜单、快捷键与独立窗口在 native-preview 验收；浏览器夹具不模拟系统窗口行为。
+    app: { onAction: () => () => {}, takeInitialConnection: async () => null, tabMenu: async () => null },
     local: {
       list: async id => ({ id: id || 'local-home', path: id === 'local-folder' ? '/Users/demo/Documents' : '/Users/demo', parentId: id === 'local-folder' ? 'local-home' : null, entries: [
         { id: 'local-folder', name: 'Documents', type: 'directory', size: 0, modifiedAt: '2026-09-08T02:00:00.000Z' },

@@ -148,6 +148,7 @@ function tabsHarness (focusedKey) {
     elements: { tabs },
     state,
     tabOrder: ['ssh:a', 'files:local', 'sftp:remote-r'],
+    localTabTitle: '本机文件',
     tabPointer: null,
     createButton: (text, className, action, label) => {
       const node = new Node('button')
