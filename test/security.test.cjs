@@ -119,9 +119,12 @@ test('preload exposes only a validated dropped-File path capability', () => {
   assert.throws(() => exposedApi.app.onAction(null), /listener must be a function/u)
   const stopActions = exposedApi.app.onAction((...args) => actions.push(args))
   const nativeEvent = { sender: 'must-not-cross-bridge' }
-  for (const value of ['quit', 'unknown', null, {}, ['close-connection']]) actionListener(nativeEvent, value)
+  for (const value of ['quit', 'unknown', null, {}, ['close-connection'], 'tab-0', 'tab-10', 'tab-1\n']) actionListener(nativeEvent, value)
   actionListener(nativeEvent, 'close-connection')
   assert.deepEqual(actions, [['close-connection']])
+  const navigation = ['previous-tab', 'next-tab', 'toggle-sidebar', ...Array.from({ length: 9 }, (_, i) => `tab-${i + 1}`)]
+  for (const value of navigation) actionListener(nativeEvent, value)
+  assert.deepEqual(actions.slice(1), navigation.map(action => [action]))
   stopActions()
 })
 

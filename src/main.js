@@ -2339,8 +2339,39 @@ async function closeActiveSession () {
   if (session) await removeSession(session, true)
 }
 
-/** 原生 ⌘W 只关闭选中的服务器；模态输入和文件传输中不误关会话或整个窗口。 */
+/** 按可见混排顺序激活已有标签，不创建新连接；显式导航才滚动标签栏，后台完成仍不跳转。 */
+function switchTab (action) {
+  if (tabPointer || profileDrag || document.querySelector('dialog[open]')) return
+  const keys = tabOrder.filter(key => {
+    if (key === 'files:local') return state.filesOpen
+    if (key.startsWith('ssh:')) return state.sessions.has(key.slice(4))
+    return key.startsWith('sftp:') && state.sftpConnections.has(key.slice(5))
+  })
+  if (!keys.length) return
+  const activeKey = state.sftpActive ? state.sftp ? `sftp:${state.sftp.connectionId}` : 'files:local' : `ssh:${state.activeSessionId}`
+  const index = keys.indexOf(activeKey)
+  let key
+  if (action === 'next-tab') key = keys[(index + 1) % keys.length]
+  else if (action === 'previous-tab') key = keys[index < 0 ? keys.length - 1 : (index - 1 + keys.length) % keys.length]
+  else if (/^tab-[1-9]$/u.test(action)) key = action === 'tab-9' ? keys.at(-1) : keys[Number(action.slice(4)) - 1]
+  if (!key) return
+  // 与鼠标激活复用同一归属检查/终端聚焦逻辑，切换不丢失原命令，也不转发快捷键给远端。
+  if (key === 'files:local') openFileWorkspace()
+  else if (key.startsWith('ssh:')) activateSession(key.slice(4))
+  else activateSftp(key.slice(5))
+  const tab = elements.tabs.querySelector(`[data-tab-key="${key}"]`)
+  tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  // SFTP/未连通标签也有明确的键盘落点；在线 SSH 随后的激活帧会聚焦终端输入。
+  tab?.querySelector('.tab-select')?.focus({ preventScroll: true })
+}
+
+/** 原生动作按当前窗口状态执行；模态框内不切换服务器、不折叠表单或误关连接。 */
 function handleAppAction (action) {
+  if (action === 'previous-tab' || action === 'next-tab' || /^tab-[1-9]$/u.test(action)) return switchTab(action)
+  if (action === 'toggle-sidebar') {
+    if (!document.querySelector('dialog[open]') && !profileDrag && !tabPointer) setSidebarHidden(!document.querySelector('#app').classList.contains('sidebar-hidden'))
+    return
+  }
   if (action !== 'close-connection') return
   if (document.querySelector('dialog[open]')) return notify('请先完成或取消当前对话框，再关闭连接')
   if (state.sftpActive && !state.sftp) return notify('当前是本机文件，请先选择要关闭的服务器标签')

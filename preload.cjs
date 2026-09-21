@@ -66,7 +66,7 @@ const api = Object.freeze({
     onAction: listener => {
       if (typeof listener !== 'function') throw new TypeError('listener must be a function')
       const wrapped = (_event, action) => {
-        if (action === 'close-connection') listener(action)
+        if (typeof action === 'string' && /^(?:close-connection|previous-tab|next-tab|tab-[1-9]|toggle-sidebar)$/u.test(action)) listener(action)
       }
       ipcRenderer.on('app:action', wrapped)
       return () => ipcRenderer.removeListener('app:action', wrapped)

@@ -36,9 +36,10 @@ export class TerminalTypeahead {
     if (this.disposed || !this.enabled) return
     const firstInput = !this.inputSeen
     this.inputSeen = true
-    // 回车立刻封存命令，不预显后续可能的密码；已显示的尾字仍等真实回显接管。
+    // 回车/Tab 只封存预测，不立即撤层；否则高延迟下先露出旧前缀，再逐字回显，像重复输入。
+    // Tab 的补全和后续编辑由远端 shell 决定，不能在旧命令上继续猜测或重复发送按键。
     if (this.submitted || this.retiring) return
-    if (data === '\r' && this.anchor) {
+    if ((data === '\r' || data === '\t') && this.anchor) {
       this.submitted = true
       this.needsNewLine = true
       return

@@ -1,6 +1,6 @@
 {
   "name": "serverlink",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "private": true,
   "description": "Security-first macOS SSH client MVP",
   "main": "main.cjs",

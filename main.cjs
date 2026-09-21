@@ -51,15 +51,15 @@ function windowForSender (sender) {
   return BrowserWindow.getAllWindows().find(window => window.webContents === sender) ?? null
 }
 
-/** 关闭快捷键只通知当前可信窗口，由界面按当前连接和传输状态决定是否关闭。 */
-function closeFocusedConnection () {
+/** 原生快捷键只通知当前可信窗口；连接归属、模态保护和标签顺序留在所属 renderer 判断。 */
+function sendFocusedAction (action) {
   const window = BrowserWindow.getFocusedWindow()
   if (quitPending || !window || window.isDestroyed() || !BrowserWindow.getAllWindows().includes(window)) return
   const sender = window.webContents
   if (sender.isDestroyed() || sender.getURL() !== bundledRendererUrl || sender.mainFrame.url !== bundledRendererUrl) return
 
   // 不使用最近窗口兜底，也不直接销毁窗口，避免操作对话框时误关另一台服务器。
-  sender.send('app:action', 'close-connection')
+  sender.send('app:action', action)
 }
 
 /** 使用系统菜单接管应用快捷键，同时保留输入框和终端的原生编辑操作。 */
@@ -80,7 +80,18 @@ function registerApplicationMenu () {
     },
     {
       label: '连接',
-      submenu: [{ id: 'close-connection', label: '关闭当前连接', accelerator: 'CmdOrCtrl+W', click: closeFocusedConnection }]
+      submenu: [
+        { id: 'close-connection', label: '关闭当前连接', accelerator: 'CmdOrCtrl+W', click: () => sendFocusedAction('close-connection') },
+        { type: 'separator' },
+        { id: 'previous-tab', label: '上一个标签', accelerator: 'Control+Shift+Tab', click: () => sendFocusedAction('previous-tab') },
+        { id: 'next-tab', label: '下一个标签', accelerator: 'Control+Tab', click: () => sendFocusedAction('next-tab') },
+        ...Array.from({ length: 9 }, (_, index) => {
+          const number = index + 1
+          return { id: `tab-${number}`, label: number === 9 ? '切换到最后一个标签' : `切换到第 ${number} 个标签`, accelerator: `CmdOrCtrl+${number}`, click: () => sendFocusedAction(`tab-${number}`) }
+        }),
+        { type: 'separator' },
+        { id: 'toggle-sidebar', label: '展开 / 收起服务器侧栏', accelerator: 'CmdOrCtrl+B', click: () => sendFocusedAction('toggle-sidebar') }
+      ]
     },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] }
@@ -352,6 +363,12 @@ function createWindow (initialConnection = null) {
   window.webContents.on('will-navigate', event => event.preventDefault())
   window.webContents.on('will-attach-webview', event => event.preventDefault())
   window.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.control && !input.meta && !input.alt && input.key === 'Tab') {
+      // macOS 不一定派发菜单的 Ctrl+Tab；在 xterm 前消费，并阻止同一次按键再触发菜单或远端补全。
+      event.preventDefault()
+      if (BrowserWindow.getFocusedWindow() === window) sendFocusedAction(input.shift ? 'previous-tab' : 'next-tab')
+      return
+    }
     const command = process.platform === 'darwin' ? input.meta : input.control
     // 长按 ⌘W 只关闭第一次选中的连接，后续重复键不得顺着相邻选择连续关闭。
     if (input.type === 'keyDown' && input.isAutoRepeat && command && !input.alt && !input.shift && input.key.toLowerCase() === 'w') event.preventDefault()

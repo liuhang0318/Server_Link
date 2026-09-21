@@ -235,6 +235,53 @@ test('Enter keeps the last unacknowledged letter visible through parsing until i
   }
 })
 
+test('Tab keeps the typed prefix visible until delayed echoes are painted, without fabricating completion', async () => {
+  for (const parsedBeforeTab of [false, true]) {
+    const h = await harness()
+    h.prediction.input('git sta')
+    h.output('git s')
+    h.prediction.output('ta')
+    if (parsedBeforeTab) h.parsePending()
+    h.prediction.input('\t')
+    assert.equal(h.visible().children[0].textContent, 'git sta')
+    // 补全后的键入仍由 SSH 发送，不再追加到已经封存的旧预显中。
+    h.prediction.input('\t')
+    h.prediction.input('secret')
+    assert.equal(h.visible().children[0].textContent, 'git sta')
+    h.parsePending()
+    h.paint(1, 1)
+    assert.equal(h.visible().children[0].textContent, 'git sta')
+    h.paint(0, 0)
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.paintedLines[0], '[root@demo ~]# git sta')
+    h.output('tus ')
+    assert.equal(h.paintedLines[0], '[root@demo ~]# git status ')
+    assert.deepEqual(h.writes, ['[root@demo ~]# ', 'git s', 'ta', 'tus '])
+  }
+})
+
+test('Tab handles split echo, shell redraw and candidate lists without repainting the old prediction', async () => {
+  for (const completion of ['tus ', '\r[root@demo ~]# git status ', '\r\nstatus  stash\r\n[root@demo ~]# git sta']) {
+    const h = await harness()
+    h.prediction.input('git sta')
+    h.prediction.input('\t')
+    h.output('git s')
+    assert.equal(h.visible().children[0].textContent, 'git sta')
+    h.prediction.output('ta' + completion)
+    h.parsePending()
+    assert.equal(h.visible().children[0].textContent, 'git sta')
+    h.paint()
+    assert.equal(h.visible(), undefined)
+    h.prediction.input('\r')
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined)
+    assert.deepEqual(h.writes, ['[root@demo ~]# ', 'git s', 'ta' + completion])
+    h.output('\r\n[root@demo ~]# ')
+    h.prediction.input('ls')
+    assert.equal(h.visible().children[0].textContent, 'ls')
+  }
+})
+
 test('Enter tolerates split and combined final echoes without blank frames or duplicated terminal bytes', async () => {
   for (const chunks of [['abc\r\nPassword: '], ['a', 'bc', '\r', '\nPassword: '], ['a', 'bc\r\nPassword: ']]) {
     const h = await harness()

@@ -347,6 +347,27 @@ test('native close shortcut targets only the focused trusted window and never cl
   assert.equal(harness.windows.length, 1)
 })
 
+test('tab and sidebar accelerators dispatch fixed actions only to the focused trusted window', async () => {
+  const h = await createMainHarness()
+  const original = h.windows[0]
+  const other = h.createWindow()
+  const items = h.calls.menu.flatMap(menu => menu.submenu)
+  const shortcuts = [['previous-tab', 'Control+Shift+Tab'], ['next-tab', 'Control+Tab'], ['toggle-sidebar', 'CmdOrCtrl+B'], ...Array.from({ length: 9 }, (_, i) => [`tab-${i + 1}`, `CmdOrCtrl+${i + 1}`])]
+  h.focusWindow(original)
+  for (const [action, accelerator] of shortcuts) {
+    const item = items.find(item => item.id === action)
+    assert.equal(item.accelerator, accelerator)
+    item.click()
+    assert.deepEqual(h.calls.progress.at(-1), { ownerId: original.webContents.id, channel: 'app:action', payload: action })
+  }
+  assert.equal(h.calls.sessionStarts, 0)
+  h.focusWindow(other)
+  other.webContents.url = 'https://untrusted.example/'
+  const count = h.calls.progress.length
+  for (const [action] of shortcuts) items.find(item => item.id === action).click()
+  assert.equal(h.calls.progress.length, count)
+})
+
 test('native close shortcut ignores repeat keys without blocking ordinary edit shortcuts', async () => {
   const harness = await createMainHarness()
   const sender = harness.windows[0].webContents
@@ -364,6 +385,33 @@ test('native close shortcut ignores repeat keys without blocking ordinary edit s
     sender.emit('before-input-event', event, input)
     assert.equal(event.defaultPrevented, prevented)
   }
+})
+
+test('Ctrl+Tab is consumed before xterm, dispatched once and never changes ordinary terminal keys', async () => {
+  const h = await createMainHarness()
+  const window = h.windows[0]
+  const inputs = [
+    [{ type: 'keyDown', key: 'Tab', control: true }, 'next-tab'],
+    [{ type: 'keyDown', key: 'Tab', control: true, shift: true }, 'previous-tab'],
+    [{ type: 'keyUp', key: 'Tab', control: true }, null],
+    [{ type: 'keyDown', key: 'Tab' }, null],
+    [{ type: 'keyDown', key: 'Tab', shift: true }, null],
+    [{ type: 'keyDown', key: 'r', control: true }, null],
+    [{ type: 'keyDown', key: 'c', control: true }, null],
+    [{ type: 'keyDown', key: 'Tab', control: true, alt: true }, null]
+  ]
+  for (const [input, action] of inputs) {
+    h.calls.progress.length = 0
+    const event = createCancelableEvent()
+    window.webContents.emit('before-input-event', event, input)
+    assert.equal(event.defaultPrevented, Boolean(action))
+    assert.equal(h.calls.progress.length, action ? 1 : 0)
+    if (action) assert.equal(h.calls.progress[0].payload, action)
+  }
+  h.calls.progress.length = 0
+  h.createWindow()
+  window.webContents.emit('before-input-event', createCancelableEvent(), inputs[0][0])
+  assert.equal(h.calls.progress.length, 0)
 })
 
 test('canceling a window close never enters will-quit and leaves connections available', async () => {

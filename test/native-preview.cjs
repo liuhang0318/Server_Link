@@ -133,16 +133,32 @@ class SessionManager {
         }, 2000)
       }
     }, 700)
-    this.sessions.set(sessionId, { ownerId, emit, timer, prompt })
+    this.sessions.set(sessionId, { ownerId, emit, timer, prompt, line: '' })
     emit({ type: 'progress', sessionId, phase: 'connecting', logs: 'Preparing static fixture.' })
     return { sessionId, status: 'running' }
   }
 
-  /** 回车只返回当前配置的空提示符，模拟提交边界而不执行输入的命令。 */
+  /** 固定补全样本和回车仅生成回显，绝不执行命令；慢回显用于观察 Tab 交接与输入是否被快捷键误发。 */
   write (ownerId, sessionId, data) {
     const record = this.sessions.get(sessionId)
     if (record?.ownerId !== ownerId) return
-    const echo = data.replace(/\x7f/g, '\b \b').replace(/\r\n|\r|\n/g, '\r\n' + record.prompt)
+    let echo = ''
+    for (const character of data.replace(/\r\n/g, '\r')) {
+      if (character === '\t') {
+        const completion = { 'git sta': 'git status ', 'cd Doc': 'cd Documents/' }[record.line]
+        echo += completion ? completion.slice(record.line.length) : '\x07'
+        if (completion) record.line = completion
+      } else if (character === '\x7f') {
+        if (record.line) { record.line = record.line.slice(0, -1); echo += '\b \b' }
+      } else if (character === '\r' || character === '\n') {
+        record.line = ''
+        echo += '\r\n' + record.prompt
+      } else {
+        record.line += character
+        echo += character
+      }
+    }
+    if (process.argv.includes('--trace-input')) console.log(`SERVERLINK_NATIVE_PREVIEW_INPUT bytes=${data.length} tab=${data === '\t'}`)
     // --slow-echo 用于真实 Electron 窗口的原位预显交接验收，不访问任何远端服务器。
     setTimeout(() => {
       if (this.sessions.get(sessionId) === record) record.emit({ type: 'data', sessionId, data: echo })
