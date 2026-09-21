@@ -833,16 +833,17 @@ function createTerminalSession (sessionId, profile) {
   session.inputDisposable = terminal.onData(data => {
     // 断开期间的按键不发送、不缓存；用户确认重连后仍从全新会话开始。
     if (session.status !== 'running') return
+    // 先发原始按键，不让本地预显的 DOM/绘制开销占用网络发送时机；不等待 IPC 回执才画字。
+    api.sessions.write(sessionId, data).catch(error => {
+      session.typeahead.reset()
+      terminal.writeln(`\r\n\x1b[31m${errorMessage(error)}\x1b[0m`)
+    })
     // 预显是显示优化，任何绘制异常都不能阻止真实按键发送。
     try {
       if (session.connected && session.status === 'running') session.typeahead.input(data)
     } catch {
       session.typeahead.reset()
     }
-    api.sessions.write(sessionId, data).catch(error => {
-      session.typeahead.reset()
-      terminal.writeln(`\r\n\x1b[31m${errorMessage(error)}\x1b[0m`)
-    })
   })
   state.sessions.set(sessionId, session)
   elements.terminalStack.append(container)

@@ -1,10 +1,25 @@
 const ERASE_ECHOES = ['\b \b', '\b\x1b[K', '\x1b[D\x1b[K']
 const MAX_PENDING = 256
 
+/** 颜色/粗体不移动光标；conceal(8) 必须退出预显，256/RGB 颜色参数里的 8 不属于隐藏输入。 */
+function visibleRendition (parameters) {
+  const codes = parameters.split(';').map(Number)
+  for (let index = 0; index < codes.length; index++) {
+    if (codes[index] === 8) return false
+    if ([38, 48, 58].includes(codes[index])) {
+      const count = codes[++index] === 5 ? 1 : codes[index] === 2 ? 3 : 0
+      if (!count || index + count >= codes.length) return false
+      if (codes.slice(index + 1, index + count + 1).some(value => value > 255)) return false
+      index += count
+    }
+  }
+  return true
+}
+
 /**
  * 在原终端命令尾预显尚未确认的按键；真正的输出和历史始终由 xterm 维护。
  * ponytail: 仅识别带当前用户名的常见单行 shell 提示符，不声称能检测所有隐藏输入；
- * 自定义提示符、控制键、全屏程序和长行立即回退真实回显，不注入远端脚本或重发按键。
+ * 自定义提示符、控制键、全屏程序和长行停止预测并回退真实回显，不注入远端脚本或重发按键。
  */
 export class TerminalTypeahead {
   constructor (terminal, mount, { username, enabled = true } = {}) {
@@ -17,6 +32,7 @@ export class TerminalTypeahead {
     this.renderPending = false
     this.submitted = false
     this.retiring = false
+    this.completion = null
     this.pending = []
     this.echoPrefix = ''
     this.command = ''
@@ -38,8 +54,16 @@ export class TerminalTypeahead {
     this.inputSeen = true
     // 回车/Tab 只封存预测，不立即撤层；否则高延迟下先露出旧前缀，再逐字回显，像重复输入。
     // Tab 的补全和后续编辑由远端 shell 决定，不能在旧命令上继续猜测或重复发送按键。
-    if (this.submitted || this.retiring) return
+    if (this.submitted || this.retiring) {
+      // 补全返回前又有按键（尤其 Enter/方向键）时，无法确认 Shell 状态，禁止用旧回显重新预显。
+      this.completion = null
+      return
+    }
     if ((data === '\r' || data === '\t') && this.anchor) {
+      if (data === '\t' && this.command) {
+        const { x, y, baseY } = this.anchor
+        this.completion = { x, command: this.command, prompt: this.terminal.buffer.active.getLine(baseY + y)?.translateToString(false, 0, x) }
+      }
       this.submitted = true
       this.needsNewLine = true
       return
@@ -57,7 +81,8 @@ export class TerminalTypeahead {
     if (!this.validPosition()) return this.reset()
     for (const character of data) {
       if (character === '\b' || character === '\x7f') {
-        if (!this.command.length) return this.reset()
+        // 在空命令上多按一次退格只会响铃/无操作，不能让接下来整行输入退出即时回显。
+        if (!this.command.length) continue
         this.command = this.command.slice(0, -1)
         this.pending.push({ erase: true })
       } else {
@@ -74,6 +99,8 @@ export class TerminalTypeahead {
   /** 原始远端字节一律交给 xterm；解析只标记待交接，不提前撤下尚未绘制的预显。 */
   output (data) {
     if (this.disposed) return
+    // 补全恢复只处理纯文本/换行；控制序列可能改变隐藏输入等状态，不能仅凭旧行内容重新信任。
+    if (this.completion && typeof data === 'string' && data.includes('\x1b')) this.completion = null
     if (this.anchor && !this.retiring && !this.consumeEcho(data)) {
       // 尾字与换行/命令输出可合在一包；先停止预测，保留画面直到该包真正绘制。
       this.retiring = true
@@ -97,9 +124,12 @@ export class TerminalTypeahead {
     this.renderPending = false
     if (this.anchor && (this.retiring || !this.validPosition())) {
       const needsNewLine = this.needsNewLine
+      const completion = this.completion
       this.reset()
       // 本轮真实输出已有换行时允许识别新提示符；单纯尾字确认不能解封已提交的命令。
       this.needsNewLine = needsNewLine
+      // 只有这次 Tab 后没有别的输入，且真实画面仍是相同提示符/命令前缀，才恢复行尾预显。
+      if (completion) this.resumeCompletion(completion)
     }
     if (!this.anchor) this.recognizePrompt()
     this.render()
@@ -112,6 +142,7 @@ export class TerminalTypeahead {
     this.renderPending = false
     this.submitted = false
     this.retiring = false
+    this.completion = null
     this.anchor = null
     this.pending = []
     this.echoPrefix = ''
@@ -166,12 +197,42 @@ export class TerminalTypeahead {
     this.maxLength = 0
   }
 
-  /** 顺序核对打印字符与常见行尾退格；分包只保留短前缀，不吞掉或重放远端字节。 */
+  /** 补全只从已绘制的同一 Shell 行恢复；不推测候选项，不在 Enter、隐藏输入或中间编辑时重新武装。 */
+  resumeCompletion ({ x, command, prompt }) {
+    if (!this.enabled || !prompt) return
+    const buffer = this.terminal.buffer.active
+    if (buffer.type !== 'normal' || buffer.viewportY !== buffer.baseY || buffer.cursorX < x || buffer.cursorX >= this.terminal.cols - 1) return
+    const line = buffer.getLine(buffer.baseY + buffer.cursorY)
+    if (!line || line.isWrapped || line.translateToString(false, 0, x) !== prompt || line.translateToString(true, buffer.cursorX).trim()) return
+    const completed = line.translateToString(false, x, buffer.cursorX)
+    if (!completed.startsWith(command) || !/^[\x20-\x7e]+$/u.test(completed)) return
+    this.anchor = { x, y: buffer.cursorY, baseY: buffer.baseY, cols: this.terminal.cols, rows: this.terminal.rows }
+    this.command = completed
+    this.maxLength = completed.length
+    this.needsNewLine = false
+  }
+
+  /** 以实际字符确认输入，忽略不移动光标的可见 SGR 装饰；原始 ANSI 字节仍完整交给 xterm。 */
   consumeEcho (data) {
     if (typeof data !== 'string' || data.length > 8192) return false
     let remaining = this.echoPrefix + data
     this.echoPrefix = ''
     while (remaining) {
+      if (remaining[0] === '\x07') { remaining = remaining.slice(1); continue }
+      if (remaining.startsWith('\x1b')) {
+        const control = remaining.slice(1)
+        const rendition = /^\[([0-9;]*)m/u.exec(control)
+        if (rendition) {
+          if (!visibleRendition(rendition[1])) return false
+          remaining = remaining.slice(rendition[0].length + 1)
+          continue
+        }
+        // 高亮可跨包到达；只保留可能是 SGR 的短前缀，不能因单个 ESC 让后续整行退回网络回显。
+        if (remaining.length < 128 && /^(?:\[[0-9;]*)?$/u.test(control)) {
+          this.echoPrefix = remaining
+          return true
+        }
+      }
       const next = this.pending[0]
       if (!next) return false
       const candidates = next.erase ? ERASE_ECHOES : [next.character]
@@ -187,18 +248,20 @@ export class TerminalTypeahead {
     return true
   }
 
-  /** 预测层不接管焦点、不写入 xterm 历史；覆盖命令尾同时遮住旧光标和退格残字。 */
+  /** 直接使用 xterm 已计算的格子尺寸；输入热路径不触发布局测量，只更新变化的字和光标。 */
   render () {
     if (!this.anchor || (!this.pending.length && !this.echoPrefix && !this.writesPending && !this.renderPending)) {
       if (this.overlay) this.overlay.hidden = true
       return
     }
-    const screen = this.mount.querySelector('.xterm-screen')
-    const rect = screen?.getBoundingClientRect()
-    if (!rect?.width || !rect.height) {
+    const cell = this.terminal.dimensions?.css.cell
+    if (!cell?.width || !cell.height) {
       if (this.overlay) this.overlay.hidden = true
       return
     }
+    this.screen ??= this.mount.querySelector('.xterm-screen')
+    if (!this.screen) return
+    this.rowContainer ??= this.mount.querySelector('.xterm-rows')
     if (!this.overlay) {
       const document = this.mount.ownerDocument
       this.overlay = document.createElement('span')
@@ -209,30 +272,38 @@ export class TerminalTypeahead {
       this.caret = document.createElement('span')
       this.caret.className = 'terminal-typeahead-caret'
       this.overlay.append(this.text, this.caret)
-      screen.append(this.overlay)
+      // 预显不接管焦点/历史；限制内部布局与重绘范围，样式只初始化一次。
+      Object.assign(this.overlay.style, { position: 'absolute', pointerEvents: 'none', userSelect: 'none', zIndex: '8', whiteSpace: 'pre', contain: 'layout style paint', fontKerning: 'none' })
+      Object.assign(this.caret.style, { position: 'absolute', left: '0', top: '0', height: '100%' })
+      this.screen.append(this.overlay)
     }
-    const cellWidth = rect.width / this.terminal.cols
-    const cellHeight = rect.height / this.terminal.rows
+    const { width: cellWidth, height: cellHeight } = cell
     const options = this.terminal.options
-    Object.assign(this.overlay.style, {
-      position: 'absolute',
-      pointerEvents: 'none',
-      userSelect: 'none',
-      zIndex: '8',
-      whiteSpace: 'pre',
-      left: `${this.anchor.x * cellWidth}px`,
-      top: `${this.anchor.y * cellHeight}px`,
-      width: `${(this.maxLength + 1) * cellWidth}px`,
-      height: `${cellHeight}px`,
-      fontFamily: options.fontFamily,
-      fontSize: `${options.fontSize}px`,
-      lineHeight: `${cellHeight}px`,
-      letterSpacing: `${options.letterSpacing || 0}px`,
-      background: options.theme?.background || '#11161e',
-      color: options.theme?.foreground || '#dbe5f5'
-    })
-    this.text.textContent = this.command
-    Object.assign(this.caret.style, { position: 'absolute', left: `${this.command.length * cellWidth}px`, top: '0', height: `${cellHeight}px` })
+    // DOM renderer 对 Retina 小数格宽有字距校正；复用内联值而非 getComputedStyle，交接时不左右抖动。
+    const spacing = this.rowContainer?.style.letterSpacing || `${options.letterSpacing || 0}px`
+    const background = options.theme?.background || '#11161e'
+    const foreground = options.theme?.foreground || '#dbe5f5'
+    const geometry = JSON.stringify([this.anchor.x, this.anchor.y, cellWidth, cellHeight, options.fontFamily, options.fontSize, spacing, background, foreground])
+    if (geometry !== this.geometry) {
+      Object.assign(this.overlay.style, {
+        left: `${this.anchor.x * cellWidth}px`,
+        top: `${this.anchor.y * cellHeight}px`,
+        height: `${cellHeight}px`,
+        fontFamily: options.fontFamily,
+        fontSize: `${options.fontSize}px`,
+        lineHeight: `${cellHeight}px`,
+        letterSpacing: spacing,
+        background,
+        color: foreground
+      })
+      this.geometry = geometry
+    }
+    const width = `${(this.maxLength + 1) * cellWidth}px`
+    if (this.overlay.style.width !== width) this.overlay.style.width = width
+    // 远端只确认一部分字符时，文字和光标没有变化，不销毁文字节点或再次改样式。
+    if (this.text.textContent !== this.command) this.text.textContent = this.command
+    const caret = `translateX(${this.command.length * cellWidth}px)`
+    if (this.caret.style.transform !== caret) this.caret.style.transform = caret
     this.overlay.hidden = false
   }
 }

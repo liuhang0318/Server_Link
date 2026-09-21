@@ -6,15 +6,26 @@ const test = require('node:test')
 /** 分开模拟 xterm 的解析回调和行绘制，防止把 buffer 更新误当成用户已看到真实回显。 */
 async function harness (username = 'root') {
   const { TerminalTypeahead } = await import('../src/terminal-typeahead.mjs')
+  const metrics = { geometryReads: 0, styleWrites: 0, textWrites: 0 }
   class Node {
-    constructor () { this.children = []; this.style = {}; this.hidden = false; this.textContent = '' }
+    constructor () {
+      this.children = []
+      this.style = new Proxy({}, { set: (target, key, value) => { metrics.styleWrites++; target[key] = value; return true } })
+      this.hidden = false
+      this.text = ''
+    }
+
+    get textContent () { return this.text }
+    set textContent (value) { metrics.textWrites++; this.text = value }
     append (...nodes) { this.children.push(...nodes) }
     remove () { this.removed = true }
     setAttribute (name, value) { this[name] = value }
-    getBoundingClientRect () { return { width: 960, height: 480 } }
+    getBoundingClientRect () { metrics.geometryReads++; return { width: 960, height: 480 } }
   }
   const screen = new Node()
-  const mount = { querySelector: () => screen, ownerDocument: { createElement: () => new Node() } }
+  const rows = new Node()
+  rows.style.letterSpacing = '0.03125px'
+  const mount = { querySelector: selector => selector === '.xterm-rows' ? rows : screen, ownerDocument: { createElement: () => new Node() } }
   const lines = ['']
   const buffer = {
     type: 'normal',
@@ -34,6 +45,7 @@ async function harness (username = 'root') {
     buffer: { active: buffer },
     cols: 120,
     rows: 24,
+    dimensions: { css: { cell: { width: 8, height: 20 } } },
     options: { fontFamily: 'monospace', fontSize: 14, theme: { background: '#11161e' } },
     write: (data, callback) => { writes.push(data); callbacks.push({ data, callback }) },
     onRender: listener => { renderListeners.add(listener); return { dispose: () => renderListeners.delete(listener) } }
@@ -41,6 +53,7 @@ async function harness (username = 'root') {
   let escape = ''
   function parse (data) {
     for (const character of data) {
+      if (character === '\x07') continue
       if (escape || character === '\x1b') {
         escape += character
         if (escape.length > 2 && /[a-zA-Z]$/.test(escape)) {
@@ -71,8 +84,53 @@ async function harness (username = 'root') {
   function output (data) { prediction.output(data); flush() }
   function visible () { return screen.children.find(node => !node.hidden && !node.removed) }
   output('[root@demo ~]# ')
-  return { prediction, terminal, buffer, screen, writes, flush, parsePending, paint, output, visible, lines, paintedLines, renderListeners }
+  return { prediction, terminal, buffer, screen, rows, metrics, writes, flush, parsePending, paint, output, visible, lines, paintedLines, renderListeners }
 }
+
+test('typing and partial acknowledgements do not read layout or rewrite unchanged prediction text', async () => {
+  const h = await harness()
+  Object.assign(h.metrics, { geometryReads: 0, styleWrites: 0, textWrites: 0 })
+  const command = 'abcdefghijklmnopqrstuvwxyz'.repeat(3)
+  for (let index = 0; index < command.length; index++) {
+    h.prediction.input(command[index])
+    if (index >= 3) h.output(command[index - 3])
+  }
+  console.log(`TYPEAHEAD_COST ${JSON.stringify(h.metrics)}`)
+  assert.equal(h.metrics.geometryReads, 0)
+  assert.equal(h.metrics.textWrites, command.length)
+  assert.ok(h.metrics.styleWrites < command.length * 3 + 30, 'stable geometry must not be reassigned for every key and echo')
+  assert.equal(h.visible().children[0].textContent, command)
+  h.output(command.slice(-3))
+  assert.equal(h.visible(), undefined)
+  assert.equal(h.lines[0], '[root@demo ~]# ' + command)
+})
+
+test('prediction uses public cell dimensions and renderer spacing across geometry changes', async () => {
+  const h = await harness()
+  h.prediction.input('fi')
+  assert.equal(h.visible().style.letterSpacing, '0.03125px')
+  assert.equal(h.visible().style.fontKerning, 'none')
+  assert.equal(h.visible().style.height, '20px')
+  h.terminal.dimensions.css.cell = { width: 8.5, height: 21 }
+  h.rows.style.letterSpacing = '0.0625px'
+  h.prediction.input('x')
+  assert.equal(h.visible().style.letterSpacing, '0.0625px')
+  assert.equal(h.visible().style.height, '21px')
+  assert.equal(h.visible().children[1].style.transform, 'translateX(25.5px)')
+  assert.equal(h.metrics.geometryReads, 0)
+})
+
+test('missing or zero renderer dimensions hide prediction without synchronous layout measurement', async () => {
+  for (const dimensions of [undefined, { css: { cell: { width: 0, height: 20 } } }]) {
+    const h = await harness()
+    h.terminal.dimensions = dimensions
+    h.prediction.input('a')
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.metrics.geometryReads, 0)
+    h.output('a')
+    assert.equal(h.lines[0], '[root@demo ~]# a')
+  }
+})
 
 test('inline typing is immediate and never writes fabricated bytes or takes focus', async () => {
   const h = await harness()
@@ -101,6 +159,34 @@ test('partial acknowledgements and asynchronous writes keep one stable inline pr
   assert.equal(h.visible(), undefined)
   assert.equal(h.lines[0], '[root@demo ~]# abc')
   assert.deepEqual(h.writes, ['[root@demo ~]# ', 'a', 'bc'])
+})
+
+test('ordinary typing stays immediate across colored shell echoes, including split SGR packets', async () => {
+  for (const color of ['\x1b[32m', '\x1b[1;34m', '\x1b[38;5;8m', '\x1b[38;2;8;10;20m']) {
+    const h = await harness()
+    h.prediction.input('git')
+    h.output('g')
+    for (const byte of color) h.output(byte)
+    h.prediction.input(' ')
+    assert.equal(h.visible().children[0].textContent, 'git ')
+    h.output('it\x1b[0m ')
+    h.prediction.input('status')
+    assert.equal(h.visible().children[0].textContent, 'git status')
+    h.output(color + 'status\x1b[m')
+    assert.equal(h.visible(), undefined)
+    assert.equal(h.lines[0], '[root@demo ~]# git status')
+    assert.equal(h.writes.join(''), '[root@demo ~]# g' + color + 'it\x1b[0m ' + color + 'status\x1b[m')
+  }
+})
+
+test('concealed rendition and incomplete extended colors revoke prediction instead of exposing input', async () => {
+  for (const decoration of ['\x1b[8m', '\x1b[1;8m', '\x1b[38;5m', '\x1b[38;2;10m']) {
+    const h = await harness()
+    h.prediction.input('a')
+    h.output(decoration + 'a')
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined)
+  }
 })
 
 test('first connected keystroke recognizes a bare initial prompt after open/fit without rearming later resets', async () => {
@@ -138,8 +224,8 @@ test('tail deletion masks confirmed characters and recognizes fragmented erase e
   }
 })
 
-test('control keys, unsupported text, empty backspace and long lines fall back without replay', async () => {
-  for (const input of ['\r', '\t', '\x03', '\x1b[A', '中文', '\x7f', 'x'.repeat(300)]) {
+test('control keys, unsupported text and long lines fall back without replay', async () => {
+  for (const input of ['\r', '\t', '\x03', '\x1b[A', '中文', 'x'.repeat(300)]) {
     const h = await harness()
     h.prediction.input(input)
     assert.equal(h.visible(), undefined)
@@ -150,6 +236,20 @@ test('control keys, unsupported text, empty backspace and long lines fall back w
     h.prediction.input('a')
     assert.equal(h.visible().children[0].textContent, 'a')
   }
+})
+
+test('deleting to an empty command and extra backspaces do not disable the next ordinary input', async () => {
+  const h = await harness()
+  h.prediction.input('a')
+  h.output('a')
+  h.prediction.input('\x7f\x7f\x7f')
+  h.output('\b \b\x07')
+  h.prediction.input('new')
+  assert.equal(h.visible().children[0].textContent, 'new')
+  assert.equal(h.lines[0].trimEnd(), '[root@demo ~]#')
+  h.output('new')
+  assert.equal(h.visible(), undefined)
+  assert.equal(h.lines[0], '[root@demo ~]# new')
 })
 
 test('password and unknown prompts never enable prediction, configured username is required', async () => {
@@ -279,6 +379,42 @@ test('Tab handles split echo, shell redraw and candidate lists without repaintin
     h.output('\r\n[root@demo ~]# ')
     h.prediction.input('ls')
     assert.equal(h.visible().children[0].textContent, 'ls')
+  }
+})
+
+test('typing after a confirmed Tab completion resumes immediate prediction from the real completed tail', async () => {
+  for (const completion of ['tus ', '\r[root@demo ~]# git status ']) {
+    const h = await harness()
+    h.prediction.input('git sta')
+    h.prediction.input('\t')
+    h.output('git sta' + completion)
+    assert.equal(h.visible(), undefined)
+    h.prediction.input('--short')
+    assert.equal(h.visible().children[0].textContent, 'git status --short')
+    assert.equal(h.lines[0], '[root@demo ~]# git status ')
+    h.output('--short')
+    assert.equal(h.visible(), undefined)
+    assert.deepEqual(h.writes, ['[root@demo ~]# ', 'git sta' + completion, '--short'])
+  }
+})
+
+test('intervening input and untrusted completion replies never rearm prediction', async () => {
+  for (const input of ['\r', '\x03', '\x1b[D', '\t', 'x']) {
+    const h = await harness()
+    h.prediction.input('git sta')
+    h.prediction.input('\t')
+    h.prediction.input(input)
+    h.output('git status ')
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined, JSON.stringify(input))
+  }
+  for (const reply of ['\r\nPassword: ', '\r\n[root@demo elsewhere]# git status ', '\r\n[root@demo ~]# other ', '\x1b[?1049h', 'tus \x1b[8m']) {
+    const h = await harness()
+    h.prediction.input('git sta')
+    h.prediction.input('\t')
+    h.output('git sta' + reply)
+    h.prediction.input('secret')
+    assert.equal(h.visible(), undefined, reply)
   }
 })
 

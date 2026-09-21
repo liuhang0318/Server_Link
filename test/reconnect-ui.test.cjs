@@ -262,13 +262,14 @@ test('a deleted connection profile reports the issue without starting or discard
 test('real terminal input drops disconnected keystrokes but preserves one-shot handshake and connected input', () => {
   const writes = []
   const predicted = []
+  const sequence = []
   let input
-  const session = { status: 'exited', connected: true, typeahead: { input: data => predicted.push(data), reset () {} } }
+  const session = { status: 'exited', connected: true, typeahead: { input: data => { sequence.push('predict'); predicted.push(data) }, reset () {} } }
   const context = vm.createContext({
     session,
     sessionId: 'old',
     terminal: { onData: listener => { input = listener }, writeln: message => assert.fail(message) },
-    api: { sessions: { write: async (id, data) => writes.push({ id, data }) } },
+    api: { sessions: { write: async (id, data) => { sequence.push('send'); writes.push({ id, data }) } } },
     errorMessage: error => error.message
   })
   const start = source.indexOf('session.inputDisposable = terminal.onData(data => {')
@@ -288,6 +289,12 @@ test('real terminal input drops disconnected keystrokes but preserves one-shot h
   input('ls\r')
   assert.deepEqual(writes, [{ id: 'old', data: 'handshake secret\r' }, { id: 'old', data: 'ls\r' }])
   assert.deepEqual(predicted, ['ls\r'])
+  assert.deepEqual(sequence, ['send', 'send', 'predict'])
+  // 绘制异常也只能撤下预显，不能阻断已经发送的真实按键或触发补发。
+  session.typeahead.input = () => { throw new Error('render unavailable') }
+  input('x')
+  assert.equal(writes.length, 3)
+  assert.deepEqual(writes.at(-1), { id: 'old', data: 'x' })
 })
 
 test('sidebar connection reuses a disconnected tab, keeps its custom title and returns the replacement ID', async () => {
