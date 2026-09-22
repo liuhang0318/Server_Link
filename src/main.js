@@ -9,8 +9,10 @@ import { connectBatch } from './connection-batch.mjs'
 import { filterFiles, refreshedSelection, selectFileRange, isUploadableEntry } from './file-browser.mjs'
 import { animateSurface } from './motion.mjs'
 import { TerminalTypeahead } from './terminal-typeahead.mjs'
+import { TerminalRenderer } from './terminal-renderer.mjs'
 
 const api = window.serverLink
+const terminalRenderer = new TerminalRenderer()
 document.querySelector('#app-version').textContent = `SSH & SFTP · v${version}`
 const elements = {
   profileList: document.querySelector('#profile-list'),
@@ -879,6 +881,7 @@ function syncTerminalPresentation (session) {
       session.terminal.open(session.terminalMount)
       session.opened = true
     }
+    syncTerminalRenderer(session)
     if (wasHidden && !exited) session.terminal.focus()
     window.requestAnimationFrame(() => {
       if (state.activeSessionId !== session.id || state.sftpActive || session.terminalMount.classList.contains('hidden')) return
@@ -2219,11 +2222,22 @@ function activateSession (sessionId) {
   })
 }
 
+/** 绘制后端切换后重新读取字符度量；异步尺寸同步仍核对焦点，不打断其他终端输入。 */
+function syncTerminalRenderer (session) {
+  terminalRenderer.use(session?.opened ? session.terminal : null, () => {
+    session.typeahead.invalidateRenderer()
+    window.requestAnimationFrame(() => {
+      if (state.sessions.get(session.id) === session && state.activeSessionId === session.id && !state.sftpActive) fitActiveTerminal()
+    })
+  })
+}
+
 function syncWorkspaceState () {
   highlightProfile()
   const session = !state.sftpActive && state.activeSessionId
     ? state.sessions.get(state.activeSessionId)
     : null
+  syncTerminalRenderer(session)
   const hasView = Boolean(session || state.sftpActive)
   elements.emptyState.classList.toggle('hidden', hasView)
   elements.terminalStack.classList.toggle('active', Boolean(session))
@@ -2296,6 +2310,8 @@ async function removeSession (session, requestClose) {
   if (state.sessions.get(session.id) !== session) return
   const wasActive = !state.sftpActive && state.activeSessionId === session.id
   const shouldClose = requestClose && session.status !== 'exited'
+  // 必须在 xterm 销毁前解绑 GPU 丢失监听；后台连接关闭不会动当前 GPU 上下文。
+  terminalRenderer.release(session.terminal)
   for (const disposable of session.typeaheadDisposables ?? []) disposable.dispose()
   session.typeahead?.dispose()
   session.inputDisposable?.dispose()

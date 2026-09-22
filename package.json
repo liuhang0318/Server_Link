@@ -1,6 +1,6 @@
 {
   "name": "serverlink",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "private": true,
   "description": "Security-first macOS SSH client MVP",
   "main": "main.cjs",
@@ -14,6 +14,7 @@
   "dependencies": {
     "@electerm/ssh2": "1.22.0",
     "@xterm/addon-fit": "0.12.0-beta.292",
+    "@xterm/addon-webgl": "0.20.0-beta.291",
     "@xterm/xterm": "6.1.0-beta.292",
     "node-pty": "1.2.0-beta.15"
   },
@@ -38,6 +39,7 @@
       { "from": "build/dock-icon.png", "to": "dock-icon.png" }
     ],
     "files": [
+      "THIRD_PARTY_NOTICES.md",
       "dist/**/*",
       "lib/**/*.cjs",
       "main.cjs",

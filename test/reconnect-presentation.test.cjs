@@ -35,7 +35,7 @@ function presentation (overrides = {}, active = true) {
     terminal: { focus: () => { focused++ } },
     ...overrides
   }
-  const context = vm.createContext({ state: { activeSessionId: active ? 'fixture' : 'other', sftpActive: false }, window: { requestAnimationFrame () {} } })
+  const context = vm.createContext({ state: { activeSessionId: active ? 'fixture' : 'other', sftpActive: false }, syncTerminalRenderer () {}, window: { requestAnimationFrame () {} } })
   vm.runInContext(source.slice(source.indexOf('function syncTerminalPresentation ('), source.indexOf('async function reconnectSession (')), context)
   context.syncTerminalPresentation(session)
   return { session, focused: () => focused }

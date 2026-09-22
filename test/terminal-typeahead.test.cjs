@@ -132,6 +132,30 @@ test('missing or zero renderer dimensions hide prediction without synchronous la
   }
 })
 
+test('GPU spacing is measured once per font/backend and backend changes preserve pending input', async () => {
+  const h = await harness()
+  const mount = h.prediction.mount
+  const createElement = mount.ownerDocument.createElement
+  let measurements = 0
+  mount.querySelector = selector => selector === '.xterm-screen' ? h.screen : null
+  mount.ownerDocument.createElement = tag => tag === 'canvas'
+    ? { getContext: () => ({ measureText: () => { measurements++; return { width: 8.25 } } }) }
+    : createElement(tag)
+  h.prediction.input('ab')
+  assert.equal(h.visible().style.letterSpacing, '-0.25px')
+  h.prediction.input('c')
+  h.output('a')
+  assert.equal(measurements, 1)
+  assert.equal(h.visible().children[0].textContent, 'abc')
+  h.prediction.invalidateRenderer()
+  mount.querySelector = selector => selector === '.xterm-rows' ? h.rows : h.screen
+  h.prediction.render()
+  assert.equal(h.visible().style.letterSpacing, '0.03125px')
+  assert.equal(h.visible().children[0].textContent, 'abc')
+  h.output('bc')
+  assert.equal(h.visible(), undefined)
+})
+
 test('inline typing is immediate and never writes fabricated bytes or takes focus', async () => {
   const h = await harness()
   h.prediction.input('echo hello')

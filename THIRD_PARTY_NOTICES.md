@@ -1,6 +1,6 @@
 # Open-source acknowledgements
 
-ServerLink uses Electron, xterm.js, node-pty and @electerm/ssh2. Dependency versions are locked in package-lock.json; their original licenses are included in the installed packages.
+ServerLink uses Electron, xterm.js (including the official WebGL addon), node-pty and @electerm/ssh2. Dependency versions are locked in package-lock.json; their original licenses are included in the installed packages.
 
 The app-owned known_hosts implementation and loopback SFTP fixture were developed with reference to Electerm's SSH/SFTP implementations:
 
@@ -12,6 +12,8 @@ The following notice applies to the referenced upstream material, not as a new l
 Copyright (c) since 2017~ ZHAO Xudong <zxdong@gmail.com>
 
 Copyright Brian White. All rights reserved.
+
+Copyright (c) 2018, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

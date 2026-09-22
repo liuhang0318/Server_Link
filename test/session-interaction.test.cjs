@@ -25,6 +25,7 @@ function closeHarness (order, active = 'a') {
   }
   const context = vm.createContext({
     state,
+    terminalRenderer: { release () {} },
     tabOrder: order,
     setTimeout () {},
     renderTabs () {},

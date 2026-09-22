@@ -1,7 +1,7 @@
 'use strict'
 
 // 原生菜单验收专用：真实 Electron/main/preload/dist，所有主机和文件服务均为无网络桩。
-const { app, session } = require('electron')
+const { app, session, ipcMain, screen } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -40,12 +40,18 @@ app.on('browser-window-created', (_event, window) => {
     if (details.level === 'error') console.error(`SERVERLINK_NATIVE_PREVIEW_RENDERER_ERROR ${details.message}`)
   })
   window.once('ready-to-show', () => {
-    window.setTitle('ServerLink · 隔离快捷键验收')
+    window.setTitle(process.argv.includes('--measure-frames') ? 'ServerLink · 帧率验收' : 'ServerLink · 隔离快捷键验收')
     console.log(`SERVERLINK_NATIVE_PREVIEW_READY userData=${temporaryRoot}`)
+    if (process.argv.includes('--measure-frames')) console.log('SERVERLINK_DISPLAY', JSON.stringify({ hz: screen.getDisplayMatching(window.getBounds()).displayFrequency, gpu: app.getGPUFeatureStatus() }))
   })
 })
 // 额外封住浏览器网络出口；静态文件照常加载，不发出 HTTP/WebSocket 请求。
 app.whenReady().then(() => {
+  if (process.argv.includes('--measure-frames')) {
+    // 性能探针只在本机无网络演示里启用，不开放给正式 renderer，也不改变窗口刷新策略。
+    session.defaultSession.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'frame-probe.cjs') })
+    ipcMain.on('fixture:frames', (_event, metrics) => console.log('SERVERLINK_FRAMES', JSON.stringify(metrics)))
+  }
   session.defaultSession.webRequest.onBeforeRequest(
     { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] },
     (_details, callback) => {
@@ -123,6 +129,17 @@ class SessionManager {
       }
       emit({ type: 'progress', sessionId, phase: 'connected', logs: 'Static fixture: no network connection.' })
       emit({ type: 'data', sessionId, data: `\x1b[32m${profile.name} · 隔离演示，无远程连接\x1b[0m\r\n${prompt}` })
+      if (process.argv.includes('--render-load') && profile.id.endsWith('2')) {
+        // 固定 30 秒的纯内存输出压力；不执行 shell，不把它作为网络/服务器性能结果。
+        console.log('SERVERLINK_RENDER_LOAD_START')
+        let batches = 0
+        record.stream = setInterval(() => {
+          if (this.sessions.get(sessionId) !== record || ++batches > 1875) { clearInterval(record.stream); console.log('SERVERLINK_RENDER_LOAD_END'); return }
+          // 每一批字符确实变化，不能用完全相同的行误测成渲染器的缓存命中。
+          const chunk = Array.from({ length: 100 }, (_, index) => `render fixture ${batches * 100 + index} abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n`).join('')
+          emit({ type: 'data', sessionId, data: chunk })
+        }, 16)
+      }
       if (disconnectOnce && firstAttempt) {
         // 提示符显示两秒后模拟远端断线；复用 timer 字段让主动关闭仍能撤销此事件。
         record.timer = setTimeout(() => {
@@ -173,6 +190,7 @@ class SessionManager {
     if (record?.ownerId !== ownerId) return false
     this.sessions.delete(sessionId)
     clearTimeout(record.timer)
+    clearInterval(record.stream)
     record.emit({ type: 'exit', sessionId, exitCode: 0 })
     console.log(`SERVERLINK_NATIVE_PREVIEW_SESSION_CLOSED ${sessionId}`)
     return true

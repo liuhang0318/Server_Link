@@ -40,6 +40,7 @@ function harness () {
   }
   const context = vm.createContext({
     state,
+    terminalRenderer: { release () {} },
     tabOrder: ['ssh:before', 'ssh:old', 'files:local', 'ssh:after'],
     tabPointer: null,
     profileById: id => state.profiles.find(item => item.id === id),

@@ -174,6 +174,27 @@ export class TerminalTypeahead {
     this.overlay = null
   }
 
+  /** GPU/DOM 切换只使绘制度量失效，不丢弃已输入但尚未回显的字符。 */
+  invalidateRenderer () {
+    this.rowContainer = null
+    this.geometry = null
+    this.fontMeasurement = null
+  }
+
+  /** GPU 字格会按设备像素取整；只在字体/后端变化时量字宽，避免与预显字体交接时横向跳动。 */
+  rendererSpacing (cellWidth) {
+    const options = this.terminal.options
+    if (this.rowContainer?.style.letterSpacing) return this.rowContainer.style.letterSpacing
+    const font = `${options.fontWeight || 'normal'} ${options.fontSize}px ${options.fontFamily}`
+    if (this.fontMeasurement?.font !== font) {
+      this.measureContext ??= this.mount.ownerDocument.createElement('canvas').getContext?.('2d')
+      if (!this.measureContext) return `${options.letterSpacing || 0}px`
+      this.measureContext.font = font
+      this.fontMeasurement = { font, width: this.measureContext.measureText('W').width }
+    }
+    return `${cellWidth - this.fontMeasurement.width}px`
+  }
+
   /** 只有正常缓冲区的未换行命令尾可预测；滚动历史、重排与全屏模式均不覆盖。 */
   validPosition () {
     const buffer = this.terminal.buffer.active
@@ -280,7 +301,7 @@ export class TerminalTypeahead {
     const { width: cellWidth, height: cellHeight } = cell
     const options = this.terminal.options
     // DOM renderer 对 Retina 小数格宽有字距校正；复用内联值而非 getComputedStyle，交接时不左右抖动。
-    const spacing = this.rowContainer?.style.letterSpacing || `${options.letterSpacing || 0}px`
+    const spacing = this.rendererSpacing(cellWidth)
     const background = options.theme?.background || '#11161e'
     const foreground = options.theme?.foreground || '#dbe5f5'
     const geometry = JSON.stringify([this.anchor.x, this.anchor.y, cellWidth, cellHeight, options.fontFamily, options.fontSize, spacing, background, foreground])
