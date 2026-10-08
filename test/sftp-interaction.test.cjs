@@ -16,6 +16,7 @@ function harness () {
   const context = vm.createContext({
     state,
     tabOrder: [],
+    tabPointer: null,
     uploadTargets: new Set(),
     profileById: id => ({ id, name: id, auth: 'key' }),
     createRemotePane: connection => { connection.ui = { pane: { remove () {}, querySelector: () => ({}) } } },

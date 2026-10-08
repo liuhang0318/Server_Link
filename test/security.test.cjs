@@ -77,7 +77,7 @@ test('preload exposes only a validated dropped-File path capability', () => {
   assert.deepEqual(invocations.at(-1), ['app:take-initial-connection'])
   assert.deepEqual(Object.keys(exposedApi.privateKeys), ['getPathForFile'])
   assert.deepEqual(Object.keys(exposedApi.sftp).sort(), [
-    'cancelConnect', 'cancelUpload', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onProgress', 'remove', 'upload', 'uploadFiles'
+    'cancelConnect', 'cancelUpload', 'close', 'connect', 'copyBetween', 'download', 'list', 'mkdir', 'onDisconnected', 'onProgress', 'remove', 'upload', 'uploadFiles'
   ])
   assert.equal(
     exposedApi.privateKeys.getPathForFile({ name: 'id_ed25519', size: 411, localPath: '/Users/test/.ssh/id_ed25519' }),

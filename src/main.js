@@ -54,6 +54,8 @@ const state = {
   pendingEvents: new Map(),
   retiredSessionIds: new Set(),
   activeSessionId: null,
+  viewKey: null,
+  viewRevision: 0,
   sftp: null,
   sftpConnections: new Map(),
   sftpActive: false,
@@ -61,6 +63,7 @@ const state = {
   sftpBusy: false,
   secretResolve: null,
   sftpConnecting: new Set(),
+  sftpDisconnects: new Map(),
   draggedRemote: null,
   copySource: null,
   connectingProfiles: new Set()
@@ -105,6 +108,7 @@ let batchMode = false
 let batchVisited = false
 let profileSaving = false
 let folderConnection = null
+let folderConnectionId = null
 let notificationTimer
 let presentedView = null
 let sidebarResizeTimer = null
@@ -151,6 +155,25 @@ function createButton (text, className, action, label) {
 function visibleProfiles () {
   const query = profileSearch.value.trim().toLocaleLowerCase()
   return state.profiles.filter(profile => `${profile.name} ${profile.host} ${profile.username} ${profile.group ?? ''}`.toLocaleLowerCase().includes(query))
+}
+
+/** 搜索唯一结果才接受回车连接；组合输入、长按和管理模式不得意外触发网络连接。 */
+function handleProfileSearchKey (event) {
+  if (event.isComposing || event.keyCode === 229 || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || document.querySelector('dialog[open]')) return
+  if (event.key === 'Escape' && profileSearch.value) {
+    event.preventDefault()
+    profileSearch.value = ''
+    renderProfiles()
+    return
+  }
+  if (event.key !== 'Enter' || !profileSearch.value.trim() || managingProfiles || profileOrganizationSaving) return
+  const matches = visibleProfiles()
+  if (matches.length !== 1) return
+  event.preventDefault()
+  if (state.connectingProfiles.has(matches[0].id)) return
+  // 用户明确回车后才移交输入焦点；仍走已有复用/重连入口，不能另开重复会话。
+  profileSearch.blur()
+  connectProfile(matches[0].id)
 }
 
 /** 原地更新管理控件，勾选时不重建卡片，保留键盘焦点和拖动起点。 */
@@ -441,11 +464,12 @@ function renderProfiles () {
       const count = document.createElement('span')
       count.className = 'group-count'
       count.textContent = String(members.length)
-      const connectAll = createButton(connectingGroups.has(group.key) ? '连接中…' : '全部连接', 'group-connect', event => {
+      const connectAll = createButton(connectingGroups.has(group.key) ? '连接中…' : query ? '连接筛选结果' : '全部连接', 'group-connect', event => {
         event.preventDefault()
         event.stopPropagation()
-        connectProfileGroup(group)
-      }, `连接 ${group.name} 组内全部服务器`)
+        // 搜索时数量、可见列表和连接范围保持一致，避免启动被筛掉的服务器。
+        connectProfileGroup(query ? { ...group, profiles: members } : group)
+      }, query ? `连接 ${group.name} 组内筛选出的 ${members.length} 台服务器` : `连接 ${group.name} 组内全部服务器`)
       connectAll.disabled = connectingGroups.has(group.key)
       summary.append(title, count, connectAll)
       bindProfileDropTarget(summary, group)
@@ -525,16 +549,18 @@ function highlightProfile () {
   for (const group of elements.profileList.querySelectorAll('.profile-group')) group.classList.toggle('has-active', Boolean(group.querySelector('.profile-item.selected')))
 }
 
-/** 一组只启动一次批次；并发启动并复用已有终端，全部启动后只切换一次焦点。 */
+/** 一组只启动一次批次；并发复用已有终端，只有从空工作区开始才在完成后选择连接。 */
 async function connectProfileGroup (group) {
   if (connectingGroups.has(group.key)) return
+  const startedEmpty = !state.activeSessionId && !state.sftpActive
+  const viewRevision = state.viewRevision ?? 0
+  const focusOrigin = document.activeElement
   connectingGroups.add(group.key)
   expandedProfileGroups.add(group.key)
   renderProfiles()
   let opened = 0
   let skipped = 0
   let failed = 0
-  let lastId = null
   try {
     const ids = await connectBatch(group.profiles, async profile => {
       const existing = [...state.sessions.values()].find(item => item.profileId === profile.id && item.status === 'running')
@@ -547,8 +573,9 @@ async function connectProfileGroup (group) {
       else failed++
       return id
     })
-    lastId = ids.filter(Boolean).at(-1)
-    if (lastId) activateSession(lastId)
+    const lastId = ids.filter(id => state.sessions.has(id)).at(-1)
+    // 已有视图始终留在原处；空工作区中发生过导航也不跳转，包括用户打开后又关闭标签的情况。
+    if (startedEmpty && !state.activeSessionId && !state.sftpActive && (state.viewRevision ?? 0) === viewRevision && lastId) activateSession(lastId, { focusOrigin })
     notify(`${group.name}：已打开 ${opened} 个终端，复用 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`, failed > 0)
   } finally {
     connectingGroups.delete(group.key)
@@ -798,6 +825,7 @@ function createTerminalSession (sessionId, profile) {
 
   const session = {
     id: sessionId,
+    navigationId: sessionId,
     profileId: profile.id,
     title: profile.name,
     status: 'running',
@@ -814,6 +842,7 @@ function createTerminalSession (sessionId, profile) {
     reconnectTitle,
     reconnectButton,
     reconnecting: false,
+    focusOrigin: null,
     phase: 'connecting',
     connected: false,
     showLogs: false,
@@ -882,7 +911,7 @@ function syncTerminalPresentation (session) {
       session.opened = true
     }
     syncTerminalRenderer(session)
-    if (wasHidden && !exited) session.terminal.focus()
+    if (wasHidden && !exited) focusTerminal(session)
     window.requestAnimationFrame(() => {
       if (state.activeSessionId !== session.id || state.sftpActive || session.terminalMount.classList.contains('hidden')) return
       session.fitAddon.fit()
@@ -891,11 +920,25 @@ function syncTerminalPresentation (session) {
   }
 }
 
+/** 异步显示只沿用原聚焦意图；搜索、表单或别的控件一旦接过焦点，旧连接不能再抢回。 */
+function focusTerminal (session, origin = session.focusOrigin) {
+  if (document.querySelector('dialog[open]')) return
+  const active = document.activeElement
+  const insideTerminal = session.terminalMount.contains(active)
+  // 搜索框等节点会复用；即使焦点回到了原节点，也不能把正在编辑误判成旧聚焦意图。
+  if (!insideTerminal && (active?.matches?.('input, textarea, select') || active?.isContentEditable)) return
+  const selectedTab = active?.matches?.('.tab-select') && active.closest('[data-tab-key]')?.dataset.tabKey === `ssh:${session.id}`
+  // 连接按钮会随侧栏状态重绘而移除，此时退回 body 仍是原点击，不算用户另选输入位置。
+  const removedOrigin = active === document.body && origin?.isConnected === false
+  if (active === origin || removedOrigin || selectedTab || insideTerminal) session.terminal.focus()
+}
+
 /** 只响应已断开标签的手动重连；原位替换，不复制历史输入，用户关闭或切走始终优先。 */
 async function reconnectSession (session, { quiet = false } = {}) {
   if (state.sessions.get(session.id) !== session || session.status !== 'exited' || session.reconnecting) return
   if (!profileById(session.profileId)) return notify('服务器配置已删除，请重新添加后连接', true)
   if (state.connectingProfiles.has(session.profileId)) return notify('此服务器正在建立连接，请稍后重试')
+  const focusOrigin = document.activeElement
   session.reconnecting = true
   syncTerminalPresentation(session)
   try {
@@ -909,6 +952,8 @@ async function reconnectSession (session, { quiet = false } = {}) {
       return
     }
     replacement.title = session.title
+    // 原位重连沿用逻辑标签身份；仅保留字符串，不让新会话引用旧终端及缓冲区。
+    replacement.navigationId = session.navigationId ?? session.id
     const oldKey = `ssh:${session.id}`
     const newKey = `ssh:${replacementId}`
     tabOrder = tabOrder.filter(key => key !== newKey).map(key => key === oldKey ? newKey : key)
@@ -919,7 +964,7 @@ async function reconnectSession (session, { quiet = false } = {}) {
       const tab = elements.tabs.querySelector(`[data-tab-key="${oldKey}"]`)
       if (tab) tab.dataset.tabKey = newKey
     }
-    if (!state.sftpActive && state.activeSessionId === session.id) activateSession(replacementId)
+    if (!state.sftpActive && state.activeSessionId === session.id) activateSession(replacementId, { focusOrigin })
     await removeSession(session, false)
     return replacementId
   } catch (error) {
@@ -945,6 +990,8 @@ async function connectProfile (profileId, { activate = true, quiet = false, forc
     }
   }
   if (state.connectingProfiles.has(profileId)) return
+  const viewRevision = state.viewRevision
+  const focusOrigin = document.activeElement
   state.connectingProfiles.add(profileId)
   renderProfiles()
   let sessionId
@@ -953,7 +1000,9 @@ async function connectProfile (profileId, { activate = true, quiet = false, forc
     const result = await api.sessions.start(profileId)
     sessionId = result.sessionId
     createTerminalSession(result.sessionId, profile)
-    if (activate) activateSession(result.sessionId)
+    // 创建 IPC 期间的新导航优先，即使用户 A→B→A 也不把迟到连接切到前台。
+    if (activate && state.viewRevision === viewRevision) activateSession(result.sessionId, { focusOrigin })
+    else renderTabs()
     return result.sessionId
   } catch (error) {
     if (sessionId) await api.sessions.close(sessionId).catch(() => {})
@@ -1150,12 +1199,14 @@ function setSftpBusy (busy, message = '', connection = state.sftp, resetTransfer
 /** 终止请求只改变本台批次；等主进程停止流并清理临时文件后才解除忙碌状态。 */
 async function cancelSftpUpload (connection) {
   if (!connection.uploading || !connection.transfer || connection.cancelRequested) return
+  const connectionId = connection.connectionId
   connection.cancelRequested = true
   connection.ui.cancelUpload.disabled = true
   connection.ui.cancelUpload.textContent = '正在终止…'
   try {
-    await api.sftp.cancelUpload(connection.connectionId)
+    await api.sftp.cancelUpload(connectionId)
   } catch (error) {
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     connection.cancelRequested = false
     connection.ui.cancelUpload.disabled = false
     connection.ui.cancelUpload.textContent = '终止上传'
@@ -1163,10 +1214,45 @@ async function cancelSftpUpload (connection) {
   }
 }
 
+/** 异步结果必须仍属于原通道；原位重连复用文件栏对象，不能只检查对象是否存在。 */
+function isCurrentSftpConnection (connection, connectionId) {
+  return !connection.closed && connection.status === 'ready' && connection.connectionId === connectionId && state.sftpConnections.get(connectionId) === connection
+}
+
+/** 意外断线保留文件栏和旧路径，只开放重连；旧任务回执不能恢复状态或重放文件操作。 */
+function handleSftpDisconnected (details) {
+  const connection = state.sftpConnections.get(details?.connectionId)
+  if (!connection) {
+    // IPC 状态事件可能早于 connect 的成功回执；仅在该配置仍握手时暂存，结束即清理。
+    if (state.sftpConnecting.has(details?.profileId)) state.sftpDisconnects.set(details.connectionId, details)
+    return
+  }
+  if (connection.closed || connection.status !== 'ready') return
+  connection.reconnectSelected = uploadTargets.delete(connection.connectionId)
+  connection.status = 'failed'
+  connection.error = '连接已断开，请重新连接。未完成的文件操作不会自动重试。'
+  // 关闭绑定旧通道的确认框，用户重连后需重新发起操作，不能让旧确认作用于新会话。
+  if (folderConnection === connection) {
+    folderDialog.close()
+    folderConnection = null
+    folderConnectionId = null
+  }
+  if (state.copySource && (state.copySource.connection === connection || document.querySelector('#copy-target').value === connection.connectionId)) {
+    document.querySelector('#copy-dialog').close()
+    state.copySource = null
+  }
+  setSftpBusy(false, '', connection)
+  connection.ui?.transfer.classList.add('hidden')
+  renderSftpFiles(connection)
+  renderTabs()
+  renderRemoteChoices()
+  syncWorkspaceState()
+}
+
 /** 进度事件只更新对应文件栏，绝不重建标签或滚动当前视图。 */
 function handleUploadProgress (progress) {
   const connection = state.sftpConnections.get(progress?.connectionId)
-  if (!connection?.ui || !connection.busy || !Number.isFinite(progress.total) || !Number.isFinite(progress.transferred)) return
+  if (!connection?.ui || connection.status !== 'ready' || !connection.busy || !Number.isFinite(progress.total) || !Number.isFinite(progress.transferred)) return
   connection.transfer = progress
   const { ui } = connection
   const percent = progress.phase === 'completed' ? 100 : Math.min(99, Math.floor(progress.transferred * 100 / Math.max(1, progress.total)))
@@ -1306,6 +1392,8 @@ async function connectSftp (profileId, { activate = true, quiet = false, connect
   if (activate) activateSftp(connection.connectionId)
   if (connection.status === 'ready') return connection.connectionId
 
+  const previousPath = connection.connectedOnce ? connection.path : null
+  const selected = connection.connectedOnce ? Boolean(connection.reconnectSelected) : true
   connection.status = 'connecting'
   connection.error = ''
   renderSftpFiles(connection)
@@ -1333,19 +1421,46 @@ async function connectSftp (profileId, { activate = true, quiet = false, connect
       await api.sftp.close(result.connectionId).catch(() => {})
       return
     }
+    connection.pendingConnectionId = result.connectionId
+    let restoredPath = true
+    if (previousPath && previousPath !== result.path) {
+      try {
+        // 重连只恢复浏览位置，不重新发起上传、下载、删除或复制等旧任务。
+        result = { ...result, ...(await api.sftp.list(result.connectionId, previousPath)) }
+      } catch {
+        restoredPath = false
+      }
+    }
+    if (state.sftpConnections.get(connection.connectionId) !== connection) {
+      await api.sftp.close(result.connectionId).catch(() => {})
+      return
+    }
+    if (state.sftpDisconnects?.has(result.connectionId)) throw new Error('连接已断开，请重新连接')
     const previousId = connection.connectionId
-    Object.assign(connection, result, { status: 'ready' })
+    Object.assign(connection, result, { status: 'ready', connectedOnce: true })
     // 保留 Map、DOM 和用户拖动后的标签顺序，不按网络完成顺序重新追加。
     state.sftpConnections = new Map([...state.sftpConnections].map(([id, item]) => [id === previousId ? result.connectionId : id, item]))
-    tabOrder = tabOrder.map(key => key === `sftp:${previousId}` ? `sftp:${result.connectionId}` : key)
-    uploadTargets.add(result.connectionId)
+    const oldKey = `sftp:${previousId}`
+    const newKey = `sftp:${result.connectionId}`
+    tabOrder = tabOrder.map(key => key === oldKey ? newKey : key)
+    if (tabPointer) {
+      // 拖动或 Escape 的排序快照也迁移身份，避免重连后的标签被旧 ID 挤到末尾。
+      tabPointer.originalOrder = tabPointer.originalOrder.map(key => key === oldKey ? newKey : key)
+      if (tabPointer.key === oldKey) tabPointer.key = newKey
+      const tab = elements.tabs.querySelector(`[data-tab-key="${oldKey}"]`)
+      if (tab) tab.dataset.tabKey = newKey
+    }
+    // 旧 ID 不能残留成幽灵上传目标；首次连接默认勾选，重连保留用户原来的选择。
+    uploadTargets.delete(previousId)
+    if (selected) uploadTargets.add(result.connectionId)
     setSftpBusy(false, '', connection)
     renderSftpFiles(connection)
     animateSurface(connection.ui.pane.querySelector('.sftp-table-wrap'))
     renderTabs()
     renderRemoteChoices()
     syncWorkspaceState()
-    if (!quiet) notify('文件服务已连接')
+    if (!restoredPath) notify(`已重新连接，原目录不可用，当前目录：${result.path}`, true)
+    else if (!quiet) notify(previousPath ? '文件服务已重新连接，未重试之前的文件操作' : '文件服务已连接')
     return result.connectionId
   } catch (error) {
     if (state.sftpConnections.get(connection.connectionId) === connection) {
@@ -1359,6 +1474,10 @@ async function connectSftp (profileId, { activate = true, quiet = false, connect
     }
   } finally {
     if (credential) credential.secret = ''
+    connection.pendingConnectionId = null
+    for (const [id, details] of state.sftpDisconnects ?? []) {
+      if (details.profileId === profileId) state.sftpDisconnects.delete(id)
+    }
     state.sftpConnecting.delete(profileId)
     renderProfiles()
   }
@@ -1366,20 +1485,22 @@ async function connectSftp (profileId, { activate = true, quiet = false, connect
 
 /** 操作收尾只刷新仍打开的连接，主动断开后不再发起新的目录请求。 */
 async function refreshSftpAfterOperation (connection) {
-  if (connection.closed) return
-  const result = await api.sftp.list(connection.connectionId, connection.path)
-  if (!state.sftpConnections.has(connection.connectionId)) return
+  const connectionId = connection.connectionId
+  if (!isCurrentSftpConnection(connection, connectionId)) return
+  const result = await api.sftp.list(connectionId, connection.path)
+  if (!isCurrentSftpConnection(connection, connectionId)) return
   connection.path = result.path
   connection.entries = result.entries
 }
 
 /** 目录结果只回写存活的连接；用户主动断开造成的回执错误不再打扰当前视图。 */
 async function refreshSftp (remotePath = state.sftp?.path, connection = state.sftp) {
-  if (!connection || connection.busy || !remotePath) return
+  if (!connection || connection.busy || connection.status !== 'ready' || !remotePath) return
+  const connectionId = connection.connectionId
   setSftpBusy(true, '正在读取目录…', connection)
   try {
-    const result = await api.sftp.list(connection.connectionId, remotePath)
-    if (!state.sftpConnections.has(connection.connectionId)) return
+    const result = await api.sftp.list(connectionId, remotePath)
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     if (connection.path !== result.path) {
       // 新目录从头浏览；仅刷新当前目录则保留筛选和滚动位置。
       connection.ui.filter.value = ''
@@ -1389,52 +1510,63 @@ async function refreshSftp (remotePath = state.sftp?.path, connection = state.sf
     connection.ui.path.value = result.path
     connection.entries = result.entries
   } catch (error) {
-    if (!connection.closed) notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(connection, connectionId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
 /** 上传仍由主进程执行，只有未被关闭的原连接才接收完成反馈和目录刷新。 */
 async function uploadSftpFile (connection = state.sftp) {
-  if (!connection || connection.busy) return
+  if (!connection || connection.busy || connection.status !== 'ready') return
+  const connectionId = connection.connectionId
   setSftpBusy(true, '正在上传文件…', connection, true)
   try {
-    const result = await api.sftp.upload(connection.connectionId, connection.path)
-    // 用户已通过 × 断开时，旧结果不能再弹失败提示或发起目录刷新。
-    if (connection.closed) return
+    const result = await api.sftp.upload(connectionId, connection.path)
+    // × 关闭或原位重连后，旧结果不能再弹提示、刷新目录或解除新通道的忙碌状态。
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     if (!result.canceled) await refreshSftpAfterOperation(connection)
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     if (!result.canceled) reportUploadResults(connection, result.results)
     else connection.ui.transfer.classList.add('hidden')
   } catch (error) {
-    if (!connection.closed) notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(connection, connectionId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
 /** 下载由主进程原子落盘；× 断开后的预期中断不显示失败提示。 */
 async function downloadSftpFile (remotePath, connection = state.sftp) {
-  if (!connection || connection.busy) return
+  if (!connection || connection.busy || connection.status !== 'ready') return
+  const connectionId = connection.connectionId
   setSftpBusy(true, '正在下载文件…', connection)
   try {
-    const result = await api.sftp.download(connection.connectionId, remotePath)
-    if (!connection.closed && !result.canceled) notify('文件已保存到所选位置')
+    const result = await api.sftp.download(connectionId, remotePath)
+    if (isCurrentSftpConnection(connection, connectionId) && !result.canceled) notify('文件已保存到所选位置')
   } catch (error) {
-    if (!connection.closed) notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(connection, connectionId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
 /** 使用应用内表单收集名称，Electron 不支持 window.prompt。 */
 function createSftpDirectory (connection = state.sftp) {
-  if (!connection || connection.busy) return
+  if (!connection || connection.busy || connection.status !== 'ready') return
   folderConnection = connection
+  folderConnectionId = connection.connectionId
   folderForm.reset()
+  folderForm.querySelector('[type="submit"]').disabled = false
   folderError.textContent = ''
   folderDialog.showModal()
   folderName.focus()
@@ -1444,7 +1576,8 @@ function createSftpDirectory (connection = state.sftp) {
 async function submitSftpDirectory (event) {
   event.preventDefault()
   const connection = folderConnection
-  if (!connection || connection.busy || !state.sftpConnections.has(connection.connectionId)) return
+  if (!connection || connection.busy || !isCurrentSftpConnection(connection, folderConnectionId)) return
+  const connectionId = connection.connectionId
   const name = folderName.value.trim()
   if (!name || name === '.' || name === '..' || name.includes('/')) {
     folderError.textContent = '请输入有效名称，不能包含 / 或仅为 .、..'
@@ -1455,34 +1588,43 @@ async function submitSftpDirectory (event) {
   folderError.textContent = ''
   setSftpBusy(true, '正在新建文件夹…', connection)
   try {
-    await api.sftp.mkdir(connection.connectionId, connection.path, name)
+    await api.sftp.mkdir(connectionId, connection.path, name)
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     folderDialog.close()
     notify('文件夹已创建')
     await refreshSftpAfterOperation(connection)
   } catch (error) {
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     folderError.textContent = errorMessage(error)
     if (!folderDialog.open) notify(errorMessage(error), true)
   } finally {
-    submit.disabled = false
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (folderConnection === connection && folderConnectionId === connectionId) submit.disabled = false
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
+/** 删除确认与回执只属于原通道，断线重连后不自动重试删除或刷新新目录。 */
 async function removeSftpEntry (remotePath, connection = state.sftp) {
-  if (!connection || connection.busy) return
+  if (!connection || connection.busy || connection.status !== 'ready') return
+  const connectionId = connection.connectionId
   setSftpBusy(true, '等待删除确认…', connection)
   try {
     // Main process performs its own native confirmation so renderer code can
     // never silently approve a destructive remote operation.
-    const removed = await api.sftp.remove(connection.connectionId, remotePath)
+    const removed = await api.sftp.remove(connectionId, remotePath)
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     if (removed) await refreshSftpAfterOperation(connection)
-    if (removed) notify('远程项目已删除')
+    if (removed && isCurrentSftpConnection(connection, connectionId)) notify('远程项目已删除')
   } catch (error) {
-    notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(connection, connectionId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
@@ -1703,9 +1845,10 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
   for (const target of targets) setSftpBusy(true, `接收本地 ${fileIds.length} 个项目…`, target, true)
   try {
     await Promise.all(targets.map(async target => {
+      const connectionId = target.connectionId
       try {
-        const results = await api.local.upload(fileIds, [{ connectionId: target.connectionId, path: target.path }])
-        if (target.closed) return
+        const results = await api.local.upload(fileIds, [{ connectionId, path: target.path }])
+        if (!isCurrentSftpConnection(target, connectionId)) return
         for (const result of results) {
           const line = document.createElement('div')
           line.textContent = `${result.success ? '✓' : result.canceled ? '−' : '✕'} ${target.title} / ${result.name}${result.success ? '：完成' : result.canceled ? '：已终止' : `：${result.error}`}`
@@ -1714,14 +1857,16 @@ async function uploadLocalSelection (targets = [...state.sftpConnections.values(
         }
         await refreshSftpAfterOperation(target).catch(() => {})
       } catch (error) {
-        if (target.closed) return
+        if (!isCurrentSftpConnection(target, connectionId)) return
         const line = document.createElement('div')
         line.className = 'transfer-error'
         line.textContent = `${target.title}：${errorMessage(error)}`
         resultBox.append(line)
       } finally {
-        setSftpBusy(false, '', target)
-        renderSftpFiles(target)
+        if (target.closed || isCurrentSftpConnection(target, connectionId)) {
+          setSftpBusy(false, '', target)
+          renderSftpFiles(target)
+        }
       }
     }))
   } finally {
@@ -1774,7 +1919,8 @@ async function closeSftp (connection = state.sftp, { force = false } = {}) {
   syncWorkspaceState()
   if (anchor) columns.scrollTo({ left: columns.scrollLeft + anchor.getBoundingClientRect().left - anchorLeft, behavior: 'instant' })
   // 先更新视图再跨进程关闭，避免等待期间用户切换标签后被旧回调抢走焦点。
-  if (connection.status === 'ready') await api.sftp.close(connection.connectionId).catch(() => {})
+  // 握手成功但仍在恢复旧目录时，也必须立即断开新通道，而不是只取消已经结束的握手。
+  if (connection.status === 'ready' || connection.pendingConnectionId) await api.sftp.close(connection.pendingConnectionId ?? connection.connectionId).catch(() => {})
   else await api.sftp.cancelConnect(connection.profileId).catch(() => {})
 }
 
@@ -1805,19 +1951,22 @@ async function closeFileWorkspace () {
 async function uploadDroppedFiles (connection, files) {
   if (!connection || connection.busy || connection.status !== 'ready') return notify('目标服务器尚未就绪或正在执行文件操作，请稍后再试')
   if (!files.length || files.length > 100) return notify('请一次拖入 1～100 个文件或文件夹', true)
+  const connectionId = connection.connectionId
   setSftpBusy(true, `正在上传 ${files.length} 个项目…`, connection, true)
   notify(`开始上传 ${files.length} 个项目 → ${connection.title} ${connection.path}`)
   try {
     // File 由预加载层解析真实路径，渲染层不拼装任何本地文件路径。
-    const results = await api.sftp.uploadFiles(connection.connectionId, connection.path, files)
-    if (connection.closed) return
+    const results = await api.sftp.uploadFiles(connectionId, connection.path, files)
+    if (!isCurrentSftpConnection(connection, connectionId)) return
     reportUploadResults(connection, results)
     await refreshSftpAfterOperation(connection)
   } catch (error) {
-    if (!connection.closed) notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(connection, connectionId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', connection)
-    renderSftpFiles(connection)
+    if (connection.closed || isCurrentSftpConnection(connection, connectionId)) {
+      setSftpBusy(false, '', connection)
+      renderSftpFiles(connection)
+    }
   }
 }
 
@@ -1874,6 +2023,7 @@ function bindSftpDropTarget (target, getConnection) {
 
 /** 提交前显示具体来源与目标路径，同时提供不依赖拖拽的键盘操作入口。 */
 function openCopyDialog (source, preferredTarget) {
+  if (!isCurrentSftpConnection(source.connection, source.connection.connectionId)) return notify('源服务器已断开，请重新连接', true)
   if (source.connection.busy) return notify('源服务器正在执行文件操作')
   const destinations = [...state.sftpConnections.values()].filter(item => item !== source.connection && item.status === 'ready' && !item.busy)
   if (!destinations.length) return notify('请先打开另一台服务器的 SFTP 标签，并等待它完成当前操作', true)
@@ -1888,7 +2038,7 @@ function openCopyDialog (source, preferredTarget) {
     if (!destinations.includes(preferredTarget)) return notify('目标服务器不可用或正在传输', true)
     select.value = preferredTarget.connectionId
   }
-  state.copySource = source
+  state.copySource = { ...source, connectionId: source.connection.connectionId }
   document.querySelector('#copy-source').textContent = `来源：${source.connection.title} · ${source.path}`
   showCopyDestination()
   document.querySelector('#copy-dialog').showModal()
@@ -1904,8 +2054,10 @@ async function submitRemoteCopy (event) {
   event.preventDefault()
   const source = state.copySource
   const destination = state.sftpConnections.get(document.querySelector('#copy-target').value)
-  if (!source || !destination || !state.sftpConnections.has(source.connection.connectionId)) return notify('连接已关闭，请重新选择文件', true)
+  if (!source || !destination || !isCurrentSftpConnection(source.connection, source.connectionId) || !isCurrentSftpConnection(destination, destination.connectionId)) return notify('连接已断开，请重新选择文件', true)
   if (source.connection.busy || destination.busy) return notify('连接正在传输，请稍后再试', true)
+  const sourceId = source.connection.connectionId
+  const destinationId = destination.connectionId
   const label = `${source.name}：${source.connection.title} → ${destination.title}`
   document.querySelector('#copy-dialog').close()
   setSftpBusy(true, `正在复制 ${label}`, source.connection)
@@ -1913,16 +2065,20 @@ async function submitRemoteCopy (event) {
   notify(`开始复制 ${label}`)
   try {
     // 主进程使用两个已认证的 SFTP 通道流式转发，不需服务器之间另配 SSH 密钥。
-    await api.sftp.copyBetween(source.connection.connectionId, source.path, destination.connectionId, destination.path)
-    if (source.connection.closed || destination.closed) return
+    await api.sftp.copyBetween(sourceId, source.path, destinationId, destination.path)
+    if (!isCurrentSftpConnection(source.connection, sourceId) || !isCurrentSftpConnection(destination, destinationId)) return
     notify(`复制完成：${label}`)
     await refreshSftpAfterOperation(destination)
   } catch (error) {
-    if (!source.connection.closed && !destination.closed) notify(errorMessage(error), true)
+    if (isCurrentSftpConnection(source.connection, sourceId) && isCurrentSftpConnection(destination, destinationId)) notify(errorMessage(error), true)
   } finally {
-    setSftpBusy(false, '', source.connection)
-    setSftpBusy(false, '', destination)
-    for (const connection of state.sftpConnections.values()) renderSftpFiles(connection)
+    // 一端重连时另一端仍要释放旧复制；逐端核对 ID，不能解除新任务的忙碌状态。
+    for (const [connection, id] of [[source.connection, sourceId], [destination, destinationId]]) {
+      if (connection.closed || isCurrentSftpConnection(connection, id)) {
+        setSftpBusy(false, '', connection)
+        renderSftpFiles(connection)
+      }
+    }
   }
 }
 
@@ -2202,7 +2358,8 @@ function finishTabDrag (cancel = false) {
   }
 }
 
-function activateSession (sessionId) {
+/** 显式选择记录一次聚焦来源；后续帧只沿用这次意图，不覆盖用户新选的输入控件。 */
+function activateSession (sessionId, { focusOrigin = document.activeElement } = {}) {
   if (!state.sessions.has(sessionId)) return
   state.sftpActive = false
   state.activeSessionId = sessionId
@@ -2212,13 +2369,15 @@ function activateSession (sessionId) {
   renderTabs()
   syncWorkspaceState()
   const session = state.sessions.get(sessionId)
+  session.focusOrigin = focusOrigin
+  const viewRevision = state.viewRevision
   syncTerminalPresentation(session)
   window.requestAnimationFrame(() => {
     // SFTP 切换或关闭标签后，旧帧不能重新聚焦隐藏终端或发送错误尺寸。
-    if (state.sftpActive || state.activeSessionId !== sessionId || !state.sessions.has(sessionId) || !session.opened || session.terminalMount.classList.contains('hidden')) return
+    if (state.viewRevision !== viewRevision || state.sftpActive || state.activeSessionId !== sessionId || !state.sessions.has(sessionId) || !session.opened || session.terminalMount.classList.contains('hidden')) return
     session.fitAddon.fit()
     api.sessions.resize(session.id, session.terminal.cols, session.terminal.rows).catch(() => {})
-    session.terminal.focus()
+    focusTerminal(session, focusOrigin)
   })
 }
 
@@ -2242,6 +2401,12 @@ function syncWorkspaceState () {
   elements.emptyState.classList.toggle('hidden', hasView)
   elements.terminalStack.classList.toggle('active', Boolean(session))
   elements.sftpPanel.classList.toggle('hidden', !state.sftpActive)
+  const viewKey = session ? `ssh:${session.navigationId ?? session.id}` : state.sftpActive ? state.sftp ?? 'files:local' : null
+  if (state.viewKey !== viewKey) {
+    // 比较逻辑标签而非通道 ID；握手/原位重连换 ID 不算导航，切到另一台 SFTP 仍计数。
+    state.viewKey = viewKey
+    state.viewRevision++
+  }
   const view = session?.container ?? (state.sftpActive ? elements.sftpPanel : elements.emptyState)
   // 高频终端输出和握手事件只更新状态，不能反复触发内容入场、打断输入视觉。
   if (presentedView !== view) {
@@ -2562,6 +2727,7 @@ document.querySelector('#folder-cancel').addEventListener('click', () => folderD
 document.querySelector('#folder-cancel-x').addEventListener('click', () => folderDialog.close())
 profileSearch.addEventListener('input', renderProfiles)
 profileSearch.addEventListener('search', renderProfiles)
+profileSearch.addEventListener('keydown', handleProfileSearchKey)
 document.querySelector('#manage-profiles').addEventListener('click', () => {
   if (profileOrganizationSaving) return
   managingProfiles = !managingProfiles
@@ -2696,6 +2862,7 @@ elements.secretDialog.addEventListener('cancel', event => {
 })
 api.sessions.onEvent(handleSessionEvent)
 api.sftp.onProgress(handleUploadProgress)
+api.sftp.onDisconnected(handleSftpDisconnected)
 api.app.onAction(handleAppAction)
 
 try {

@@ -34,6 +34,7 @@ function harness (reduced = false) {
     state,
     sidebarResizeTimer: null,
     tabOrder: [],
+    tabPointer: null,
     localDirectory: {},
     selectingServers: false,
     uploadTargets: new Set(),

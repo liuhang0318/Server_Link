@@ -113,6 +113,13 @@ const api = Object.freeze({
     }
   }),
   sftp: Object.freeze({
+    /** 仅订阅本窗口连接的断线元数据，Electron 事件对象不穿过沙箱边界。 */
+    onDisconnected: listener => {
+      if (typeof listener !== 'function') throw new TypeError('listener must be a function')
+      const wrapped = (_event, payload) => listener(payload)
+      ipcRenderer.on('sftp:disconnected', wrapped)
+      return () => ipcRenderer.removeListener('sftp:disconnected', wrapped)
+    },
     /** 仅暴露本窗口上传进度数据，隔离 Electron 事件对象并允许移除监听。 */
     onProgress: listener => {
       if (typeof listener !== 'function') throw new TypeError('listener must be a function')

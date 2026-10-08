@@ -124,6 +124,14 @@ function uploadProgress (sender) {
   }
 }
 
+/** 断线状态只回送拥有此连接的窗口，不广播服务器信息，也不唤醒已经关闭的界面。 */
+function notifySftpDisconnected (ownerId, details) {
+  if (quitPending) return
+  const window = BrowserWindow.getAllWindows().find(item => item.webContents.id === ownerId)
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return
+  window.webContents.send('sftp:disconnected', details)
+}
+
 /** Registers the narrow, typed IPC surface available to the sandboxed UI. */
 function registerIpc () {
   ipcMain.handle('app:tab-menu', (event, options) => {
@@ -428,7 +436,8 @@ if (!hasSingleInstanceLock) {
     })
     sftpManager = new SftpManager({
       knownHostsPath: path.join(privateDataDirectory, 'known_hosts'),
-      confirmHost: confirmNewHost
+      confirmHost: confirmNewHost,
+      onDisconnected: notifySftpDisconnected
     })
 
     // Prepare owner-only files before accepting renderer requests or spawning ssh.

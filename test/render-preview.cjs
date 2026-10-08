@@ -137,6 +137,8 @@ const bridge = `
       }
     },
     sftp: {
+      // 原生意外断线事件由 native-preview 的 --sftp-disconnect-once 验收。
+      onDisconnected: () => () => {},
       onProgress: callback => { progressListener = callback; },
       cancelUpload: async id => { const operation = uploads.get(id); if (operation) operation.canceled = true; return Boolean(operation); },
       cancelConnect: async () => {},

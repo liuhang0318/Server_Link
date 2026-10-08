@@ -40,6 +40,7 @@ function harness () {
   }
   const context = vm.createContext({
     state,
+    document: { activeElement: null },
     terminalRenderer: { release () {} },
     tabOrder: ['ssh:before', 'ssh:old', 'files:local', 'ssh:after'],
     tabPointer: null,

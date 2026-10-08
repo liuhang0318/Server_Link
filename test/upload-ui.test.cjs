@@ -7,6 +7,13 @@ const { readFileSync } = require('node:fs')
 const path = require('node:path')
 const source = readFileSync(path.join(__dirname, '../src/main.js'), 'utf8')
 
+/** 跟随真实 renderer 校验原通道身份，不能用永远返回 true 的桩掩盖重连收尾竞态。 */
+function bindCurrentConnections (context, connections) {
+  context.state = { sftpConnections: new Map(connections.map(connection => [connection.connectionId, connection])) }
+  const start = source.indexOf('function isCurrentSftpConnection (')
+  vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context)
+}
+
 test('each upload target unlocks independently and old batch completion cannot clear a new upload', async () => {
   const pending = new Map()
   const targets = ['fast', 'slow'].map(connectionId => ({ connectionId, title: connectionId, path: '/', status: 'ready', busy: false }))
@@ -20,6 +27,7 @@ test('each upload target unlocks independently and old batch completion cannot c
     document: { querySelector: () => ({ classList: { remove () {} }, append () {}, replaceChildren () {} }), createElement: () => ({}) },
     api: { local: { upload: (_ids, selected) => new Promise(resolve => pending.set(selected[0].connectionId, resolve)) } }
   })
+  bindCurrentConnections(context, targets)
   vm.runInContext(source.slice(source.indexOf('async function uploadLocalSelection ('), source.indexOf('/** 恢复每个 SFTP')), context)
   const finished = context.uploadLocalSelection(targets, ['fixture-folder'])
   assert.equal(pending.size, 2)
@@ -38,12 +46,13 @@ test('each upload target unlocks independently and old batch completion cannot c
 
 test('dismissing the native chooser hides the preparing indicator and releases the connection', async () => {
   let hidden = false
-  const connection = { busy: false, connectionId: 'fixture', path: '/', ui: { transfer: { classList: { add: () => { hidden = true } } } } }
+  const connection = { status: 'ready', busy: false, connectionId: 'fixture', path: '/', ui: { transfer: { classList: { add: () => { hidden = true } } } } }
   const context = vm.createContext({
     api: { sftp: { upload: async () => ({ canceled: true }) } },
     setSftpBusy: busy => { connection.busy = busy },
     renderSftpFiles () {}
   })
+  bindCurrentConnections(context, [connection])
   vm.runInContext(source.slice(source.indexOf('async function uploadSftpFile ('), source.indexOf('async function downloadSftpFile (')), context)
   await context.uploadSftpFile(connection)
   assert.equal(hidden, true)
@@ -77,7 +86,7 @@ test('a busy file pane always keeps its force-close X enabled', () => {
 test('closing during an upload suppresses late result refreshes and expected disconnect errors', async () => {
   for (const failure of [false, true]) {
     let finish
-    const connection = { busy: false, connectionId: 'fixture', path: '/' }
+    const connection = { status: 'ready', busy: false, connectionId: 'fixture', path: '/' }
     const notices = []
     const context = vm.createContext({
       api: { sftp: { upload: () => new Promise((resolve, reject) => { finish = failure ? reject : resolve }) } },
@@ -88,6 +97,7 @@ test('closing during an upload suppresses late result refreshes and expected dis
       notify: message => notices.push(message),
       errorMessage: error => error.message
     })
+    bindCurrentConnections(context, [connection])
     vm.runInContext(source.slice(source.indexOf('async function uploadSftpFile ('), source.indexOf('async function downloadSftpFile (')), context)
     const uploading = context.uploadSftpFile(connection)
     connection.closed = true

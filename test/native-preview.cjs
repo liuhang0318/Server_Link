@@ -40,7 +40,7 @@ app.on('browser-window-created', (_event, window) => {
     if (details.level === 'error') console.error(`SERVERLINK_NATIVE_PREVIEW_RENDERER_ERROR ${details.message}`)
   })
   window.once('ready-to-show', () => {
-    window.setTitle(process.argv.includes('--measure-frames') ? 'ServerLink · 帧率验收' : 'ServerLink · 隔离快捷键验收')
+    window.setTitle(process.argv.includes('--measure-frames') ? 'ServerLink · 帧率验收' : process.argv.includes('--sftp-disconnect-once') ? 'ServerLink · 断线与焦点验收' : 'ServerLink · 隔离快捷键验收')
     console.log(`SERVERLINK_NATIVE_PREVIEW_READY userData=${temporaryRoot}`)
     if (process.argv.includes('--measure-frames')) console.log('SERVERLINK_DISPLAY', JSON.stringify({ hz: screen.getDisplayMatching(window.getBounds()).displayFrequency, gpu: app.getGPUFeatureStatus() }))
   })
@@ -149,7 +149,7 @@ class SessionManager {
           console.log(`SERVERLINK_NATIVE_PREVIEW_SESSION_DISCONNECTED ${sessionId}`)
         }, 2000)
       }
-    }, 700)
+    }, process.argv.includes('--slow-connect') ? 2500 : 700)
     this.sessions.set(sessionId, { ownerId, emit, timer, prompt, line: '' })
     emit({ type: 'progress', sessionId, phase: 'connecting', logs: 'Preparing static fixture.' })
     return { sessionId, status: 'running' }
@@ -215,10 +215,29 @@ class LocalFiles {
 
 /** SFTP 桩仅支持只读空目录连接，所有网络客户端均未被加载。 */
 class SftpManager {
-  constructor () { this.connections = new Map() }
-  async connect (ownerId) {
+  constructor ({ onDisconnected = () => {} } = {}) {
+    this.connections = new Map()
+    this.disconnectTimers = new Map()
+    this.disconnectedProfiles = new Set()
+    this.onDisconnected = onDisconnected
+  }
+
+  /** 仅每个演示配置首次连接模拟断线，重连保持在线；不实例化真实 SSH/SFTP 客户端。 */
+  async connect (ownerId, profile) {
     const connectionId = randomUUID()
     this.connections.set(connectionId, ownerId)
+    if (process.argv.includes('--sftp-disconnect-once') && !this.disconnectedProfiles.has(profile.id)) {
+      this.disconnectedProfiles.add(profile.id)
+      const timer = setTimeout(() => {
+        this.disconnectTimers.delete(connectionId)
+        if (this.connections.get(connectionId) !== ownerId) return
+        this.connections.delete(connectionId)
+        this.onDisconnected(ownerId, { connectionId, profileId: profile.id })
+        console.log('SERVERLINK_NATIVE_PREVIEW_SFTP_DISCONNECTED')
+      }, 8000)
+      timer.unref()
+      this.disconnectTimers.set(connectionId, timer)
+    }
     return { connectionId, path: '/demo', entries: [] }
   }
 
@@ -233,6 +252,9 @@ class SftpManager {
 
   close (ownerId, id) {
     this.assertOwned(ownerId, id)
+    // 主动关闭撤销模拟断线，不能在窗口消失后再发送旧连接通知。
+    clearTimeout(this.disconnectTimers.get(id))
+    this.disconnectTimers.delete(id)
     return this.connections.delete(id)
   }
 
@@ -240,10 +262,10 @@ class SftpManager {
   cancelUpload (ownerId, id) { this.assertOwned(ownerId, id); return false }
   async uploadBatch () { throw new Error('隔离快捷键验收不提供本机文件传输') }
   closeOwner (ownerId) {
-    for (const [id, owner] of this.connections) if (owner === ownerId) this.connections.delete(id)
+    for (const [id, owner] of this.connections) if (owner === ownerId) this.close(owner, id)
   }
 
-  closeAll () { this.connections.clear() }
+  closeAll () { for (const [id, owner] of this.connections) this.close(owner, id) }
 }
 
 // 必须在加载真实 main 前替换四个边界模块，不能实例化任何真实持久化或网络服务。
