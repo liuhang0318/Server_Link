@@ -120,6 +120,38 @@ test('prediction uses public cell dimensions and renderer spacing across geometr
   assert.equal(h.metrics.geometryReads, 0)
 })
 
+test('prediction covers the displayed canvas grid at the first and last rows after Retina rounding', async () => {
+  // 奇数行/列的半像素网格会让 WebGL 画布整体取整；旧光标不能从预显层底边露出。
+  for (const rows of [24, 31]) {
+    for (const row of [0, rows - 1]) {
+      const h = await harness()
+      h.terminal.cols = 121
+      h.terminal.rows = rows
+      const canvas = { width: Math.round(121 * 8.5), height: Math.round(rows * 21.5) }
+      h.terminal.dimensions.css = { cell: { width: 8.5, height: 21.5 }, canvas }
+      h.prediction.mount.ownerDocument.defaultView = { devicePixelRatio: 2 }
+      h.prediction.reset()
+      const prompt = '[root@demo ~]# '
+      h.output('\r' + '\n'.repeat(row) + prompt)
+      h.prediction.input('ab')
+      const overlay = h.visible()
+      const width = canvas.width / h.terminal.cols
+      const height = canvas.height / rows
+      assert.equal(overlay.style.left, `${prompt.length * width}px`)
+      assert.equal(overlay.style.top, `${row * height}px`)
+      assert.equal(overlay.style.height, `${height}px`)
+      assert.equal(overlay.style.lineHeight, `${height}px`)
+      assert.equal(overlay.style.boxShadow, '0 -0.5px 0 #11161e, 0 0.5px 0 #11161e')
+      assert.equal(overlay.children[1].style.transform, `translateX(${2 * width}px)`)
+      h.output('a')
+      assert.equal(h.visible(), overlay, 'partial remote echo keeps the aligned cover')
+      h.output('b')
+      assert.equal(h.visible(), undefined, 'painted echo hands the cursor back to xterm')
+      assert.equal(h.metrics.geometryReads, 0)
+    }
+  }
+})
+
 test('missing or zero renderer dimensions hide prediction without synchronous layout measurement', async () => {
   for (const dimensions of [undefined, { css: { cell: { width: 0, height: 20 } } }]) {
     const h = await harness()

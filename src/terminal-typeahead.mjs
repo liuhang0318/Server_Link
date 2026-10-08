@@ -275,7 +275,7 @@ export class TerminalTypeahead {
       if (this.overlay) this.overlay.hidden = true
       return
     }
-    const cell = this.terminal.dimensions?.css.cell
+    const { cell, canvas } = this.terminal.dimensions?.css || {}
     if (!cell?.width || !cell.height) {
       if (this.overlay) this.overlay.hidden = true
       return
@@ -298,13 +298,18 @@ export class TerminalTypeahead {
       Object.assign(this.caret.style, { position: 'absolute', left: '0', top: '0', height: '100%' })
       this.screen.append(this.overlay)
     }
-    const { width: cellWidth, height: cellHeight } = cell
+    // WebGL 画布整体会取整，公开的 cell 却未补偿缩放；按最终画布分格，避免旧光标从底边漏成亮点。
+    // 仅用 xterm 缓存的度量，不在打字时读取布局；尺寸未就绪时仍兼容原有单元格度量。
+    const cellWidth = canvas?.width ? canvas.width / this.terminal.cols : cell.width
+    const cellHeight = canvas?.height ? canvas.height / this.terminal.rows : cell.height
     const options = this.terminal.options
     // DOM renderer 对 Retina 小数格宽有字距校正；复用内联值而非 getComputedStyle，交接时不左右抖动。
     const spacing = this.rendererSpacing(cellWidth)
     const background = options.theme?.background || '#11161e'
     const foreground = options.theme?.foreground || '#dbe5f5'
-    const geometry = JSON.stringify([this.anchor.x, this.anchor.y, cellWidth, cellHeight, options.fontFamily, options.fontSize, spacing, background, foreground])
+    // Canvas 滤波与 DOM 裁切可能相差一个设备像素；只外扩上下背景，不拉长光标或挪动文字。
+    const edge = 1 / (this.mount.ownerDocument.defaultView?.devicePixelRatio || 1)
+    const geometry = JSON.stringify([this.anchor.x, this.anchor.y, cellWidth, cellHeight, options.fontFamily, options.fontSize, spacing, background, foreground, edge])
     if (geometry !== this.geometry) {
       Object.assign(this.overlay.style, {
         left: `${this.anchor.x * cellWidth}px`,
@@ -315,6 +320,7 @@ export class TerminalTypeahead {
         lineHeight: `${cellHeight}px`,
         letterSpacing: spacing,
         background,
+        boxShadow: `0 -${edge}px 0 ${background}, 0 ${edge}px 0 ${background}`,
         color: foreground
       })
       this.geometry = geometry
